@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Ausentes Acolhimento e Fila Médica | Origem
 // @namespace    https://om30.com.br/
-// @version      2.3.8
+// @version      2.3.14
 // @description  Ausentes do acolhimento e da fila médica separados por origem (Acolhimento x Fila Médica x Outros), devolução da mesma senha ao remover a ausência e liberação de senha presa em outro profissional ao chamar.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Ausentes-Acolhimento.user.js
@@ -21,20 +21,20 @@
 //     saudeSimplesProxy.put(baseAusenteUrl). Essa URL-modelo vem das props Vue da própria
 //     página (baseAusenteUrl / baseAusenteRollbackUrl, com :atendimento_id: e :atendimento_type:).
 //   - O coletor lê esses modelos da página e só reconhece um PUT que case com eles.
-//   - Só grava depois de resposta 2xx. Se o Saúde Simples desfizer a ausência
-//     (baseAusenteRollbackUrl, quando a senha não conclui), o evento é descartado.
+//   - Só grava depois de resposta 2xx sem rejeição explícita do Saúde Simples.
+//   - Desfazer nativo cancela a pendência e confirma o UUID exato no Worker, inclusive
+//     depois do envio; preserva o histórico e impede reaplicação de uma escrita atrasada.
 //   - Setor: /prontuarios* = MEDICO, /acolhimentos* = ACOLHIMENTO (onde o botão foi clicado).
 //   - ID: o mesmo par atendimento_type + atendimento_id que a lista de ausentes usa.
 // Nada é mostrado ao profissional. Suporte: OM30Ausencias.diagnostico() no console.
 (() => {
   'use strict';
-  const BUILD = 'OM30-D1-V5.2-2026-10-23';
+  const BUILD = 'OM30-D1-V5.3-2026-10-26';
   if (window.__OM30_AUSENCIAS_D1__) return;   // o outro script OM30 já instalou o mesmo coletor
   const API = 'https://om30-ausencias.cloud-om30-2.workers.dev';
   const KEY = String.fromCharCode(65,67,106,90,81,57,71,82,56,86,115,82,79,107,83,113,107,100,54,76,55,86,67,82,53,114,71,84,80,117,68,72,70,104,76,88,86,109,116,82,98,112,87,81,86,55,121,71);
   const PENDENTES = 'om30:ausencias-d1:v5:pendentes';
   const ESPERA_DESFAZER_MS = 20000;   // tempo para o Saúde Simples desfazer (rollback) antes de enviar
-  const MAX_PENDENTES = 100;
   const nativeFetch = window.fetch.bind(window);
   const SETOR = location.pathname.startsWith('/prontuarios') ? 'MEDICO'
     : location.pathname.startsWith('/acolhimentos') ? 'ACOLHIMENTO' : null;
@@ -117,6 +117,8 @@
       const valores = { atendimento_id: new Set(), atendimento_type: new Set() };
       mod.nomes.forEach((n, i) => valores[n].add(decodeURIComponent(mm[i + 1])));
       for (const [k, n] of Object.entries(mod.consulta)) for (const v of params[k] || []) valores[n].add(v);
+      // Campos explícitos no corpo também devem concordar com o ID/tipo da URL nativa.
+      for (const n of ['atendimento_id', 'atendimento_type']) for (const v of params[n] || []) valores[n].add(v);
       const ids = [...valores.atendimento_id], tipos = [...valores.atendimento_type];
       if (ids.length !== 1 || tipos.length > 1) return { papel: mod.papel, rota: mod.rota, erro: ids.length > 1 || tipos.length > 1 ? 'ID_DIVERGENTE' : 'SEM_ID' };
       return { papel: mod.papel, rota: mod.rota, id: ids[0], tipo: tipos[0] || null };
@@ -141,63 +143,177 @@
   }
 
   // ---------- fila local de envio ----------
-  // Atenção: o Saúde Simples substitui Date.parse (devolve null para ISO). Nunca usar Date.parse aqui.
+  // Chaves independentes por evento/operação impedem perda de eventos entre abas.
+  // Date.parse é substituído pelo Saúde Simples; use new Date(...).getTime().
+  const PREFIXO_EVENTO = PENDENTES + ':evento:';
+  const CHAVE_RETRY = PENDENTES + ':proximo-envio';
+  const RETENCAO_CONFIRMADOS_MS = 72 * 3600000;
+  const reservaMemoria = new Map();
   const instante = x => Number(x?.criadoEm) || new Date(x?.evento?.observadoEm).getTime() || 0;
-  function lerPendentes() {
-    try { const a = JSON.parse(localStorage.getItem(PENDENTES) || '[]'); return Array.isArray(a) ? a.filter(x => x && x.evento && Date.now() - instante(x) < 48 * 3600000) : []; }
-    catch { return []; }
+  const chaveEvento = (id, operacao) => PREFIXO_EVENTO + id + (operacao === 'desfazer' ? ':desfazer' : '');
+  function guardarItem(item) {
+    if (!item?.evento?.eventId) return;
+    const chave = chaveEvento(item.evento.eventId, item.operacao);
+    try { localStorage.setItem(chave, JSON.stringify(item)); reservaMemoria.delete(chave); }
+    catch { reservaMemoria.set(chave, item); stats.falhasPersistencia = (stats.falhasPersistencia || 0) + 1; }
   }
-  function gravarPendentes(lista) { try { localStorage.setItem(PENDENTES, JSON.stringify(lista.slice(-MAX_PENDENTES))); } catch {} }
-
-  const recentes = new Map();   // evita contar duas vezes a mesma requisição (axios + XHR)
+  function removerItem(item) {
+    const chave = chaveEvento(item.evento.eventId, item.operacao);
+    reservaMemoria.delete(chave);
+    try { localStorage.removeItem(chave); } catch { /* operação já confirmada no servidor */ }
+  }
+  function todosItens() {
+    const mapa = new Map();
+    try {
+      // Migração idempotente: preserva UUID, origem e instante do evento original.
+      let legado = [];
+      try { legado = JSON.parse(localStorage.getItem(PENDENTES) || '[]'); }
+      catch { stats.legadoCorrompido = true; }
+      if (Array.isArray(legado) && legado.length) {
+        let completo = true;
+        for (const item of legado) if (item?.evento?.eventId) {
+          const chave = chaveEvento(item.evento.eventId);
+          if (!localStorage.getItem(chave)) guardarItem(item);
+          if (reservaMemoria.has(chave)) completo = false;
+        }
+        if (completo) localStorage.removeItem(PENDENTES);
+      }
+      for (let i = 0; i < localStorage.length; i++) {
+        const chave = localStorage.key(i);
+        if (!chave?.startsWith(PREFIXO_EVENTO)) continue;
+        try { const item = JSON.parse(localStorage.getItem(chave)); if (item?.evento?.eventId) mapa.set(chave, item); } catch {}
+      }
+    } catch { stats.falhasLeituraLocal = (stats.falhasLeituraLocal || 0) + 1; }
+    for (const [chave, item] of reservaMemoria) mapa.set(chave, item);
+    // Nunca expira pendência ou recusa. Confirmações locais servem para rollback tardio.
+    for (const [chave, item] of mapa) if (item.enviadoEm && Date.now() - item.enviadoEm > RETENCAO_CONFIRMADOS_MS) {
+      const operacaoPendente = mapa.get(chaveEvento(item.evento.eventId, 'desfazer'));
+      if (operacaoPendente && !operacaoPendente.enviadoEm) continue;
+      removerItem(item); mapa.delete(chave);
+    }
+    return [...mapa.values()].sort((a, b) => instante(a) - instante(b));
+  }
+  function lerPendentes() {
+    const todos = todosItens();
+    const cancelados = new Set(todos.filter(x => x.operacao === 'desfazer').map(x => x.evento.eventId));
+    return todos.filter(x => !x.enviadoEm && !x.recusado && !x.cancelado &&
+      (x.operacao === 'desfazer' || !cancelados.has(x.evento.eventId)))
+      .sort((a, b) => (b.operacao === 'desfazer') - (a.operacao === 'desfazer') || instante(a) - instante(b));
+  }
+  function invalidarOrigens() { try { window.dispatchEvent(new Event('om30:ausencias-alteradas')); } catch {} }
+  const recentes = new Map(); // axios e XHR podem observar a mesma resposta nativa.
   function registrar(req, ok) {
     if (!req) return;
-    const chave = `${req.papel}|${req.tipo}|${req.id}|${ok}`;
+    const chave = req.papel + '|' + req.tipo + '|' + req.id + '|' + ok;
     const agora = Date.now();
-    if (recentes.has(chave) && agora - recentes.get(chave) < 4000) return;
+    for (const [k, em] of recentes) if (agora - em >= 4000) recentes.delete(k);
+    if (recentes.has(chave)) return;
     recentes.set(chave, agora);
     if (req.erro) { anotarIgnorada(req.erro); stats.ultimo = { estado: req.erro, rota: req.rota, em: new Date().toISOString() }; return; }
     if (!ok) { if (req.papel === 'AUSENTAR') stats.falhasNativas++; stats.ultimo = { estado: 'RESPOSTA_NATIVA_SEM_SUCESSO', rota: req.rota, em: new Date().toISOString() }; return; }
     if (!validId(req.id)) { anotarIgnorada('ID_INVALIDO'); return; }
     if (!validTipo(req.tipo)) { anotarIgnorada('SEM_TIPO'); stats.ultimo = { estado: 'SEM_TIPO', rota: req.rota, em: new Date().toISOString() }; return; }
-    let lista = lerPendentes();
     if (req.papel === 'DESFAZER') {
-      const antes = lista.length;
-      lista = lista.filter(x => !(x.evento.tipo === req.tipo && x.evento.atendimentoId === req.id && agora < x.liberarEm + 1000));
-      if (lista.length < antes) { stats.desfeitas++; gravarPendentes(lista); }
-      stats.ultimo = { estado: 'DESFEITA_PELO_SAUDE_SIMPLES', rota: req.rota, em: new Date().toISOString() };
+      // Nunca adivinha UUID nem cancela registros de outros computadores por data.
+      const alvo = todosItens().filter(x => x.operacao !== 'desfazer' && x.evento.tipo === req.tipo &&
+        x.evento.atendimentoId === req.id && instante(x) <= agora).at(-1);
+      recentes.delete('AUSENTAR|' + req.tipo + '|' + req.id + '|true');
+      if (!alvo) {
+        anotarIgnorada('ROLLBACK_SEM_EVENTO_LOCAL');
+        stats.ultimo = { estado: 'ROLLBACK_SEM_EVENTO_LOCAL', em: new Date().toISOString() };
+        invalidarOrigens(); return;
+      }
+      const existente = todosItens().find(x => x.operacao === 'desfazer' && x.evento.eventId === alvo.evento.eventId);
+      if (!existente) {
+        // Chave separada: a resposta da escrita em voo não pode sobrescrever o cancelamento.
+        guardarItem({ operacao: 'desfazer', criadoEm: agora, liberarEm: agora, evento: {
+          eventId: alvo.evento.eventId, atendimentoId: req.id, tipo: req.tipo,
+          acaoNativa: req.rota, observadoEm: new Date().toISOString()
+        } });
+        stats.desfeitas++;
+      }
+      invalidarOrigens();
+      stats.ultimo = { estado: 'DESFAZER_AGUARDANDO_D1', em: new Date().toISOString() };
+      void enviar(true);
       return;
     }
+    recentes.delete('DESFAZER|' + req.tipo + '|' + req.id + '|true');
     const evento = { eventId: crypto.randomUUID(), atendimentoId: req.id, tipo: req.tipo, origem: SETOR,
-      acaoNativa: req.rota, atorId: null, autor: profissionalLogado(), local: localAtual(), observadoEm: new Date().toISOString() };
-    lista.push({ evento, criadoEm: agora, liberarEm: agora + ESPERA_DESFAZER_MS });
-    gravarPendentes(lista);
+      acaoNativa: req.rota, atorId: null, autor: req.autor ?? profissionalLogado(), local: req.local ?? localAtual(), observadoEm: new Date().toISOString() };
+    guardarItem({ evento, criadoEm: agora, liberarEm: agora + ESPERA_DESFAZER_MS });
     stats.reconhecidas++;
+    invalidarOrigens();
     stats.ultimo = { estado: 'AGUARDANDO_ENVIO', origem: SETOR, rota: req.rota, em: evento.observadoEm };
   }
 
-  let enviando = false;
+  let enviando = false, proximoEnvio = 0, falhasConsecutivas = 0;
+  const adiarEnvio = () => {
+    falhasConsecutivas++; proximoEnvio = Date.now() + Math.min(60000, 5000 * 2 ** Math.min(4, falhasConsecutivas - 1));
+    try { localStorage.setItem(CHAVE_RETRY, String(proximoEnvio)); } catch {}
+  };
+  const podeEnviar = () => {
+    let compartilhado = 0;
+    try { compartilhado = Number(localStorage.getItem(CHAVE_RETRY)) || 0; } catch {}
+    // Um relógio corrigido ou valor local inválido não pode bloquear a fila indefinidamente.
+    const agora = Date.now();
+    if (compartilhado > agora + 60000) compartilhado = 0;
+    if (proximoEnvio > agora + 60000) proximoEnvio = 0;
+    return agora >= Math.max(proximoEnvio, compartilhado);
+  };
   async function enviar(forcar = false) {
-    if (enviando) return;
+    if (enviando || (!forcar && !podeEnviar())) return;
     enviando = true;
-    try {
-      for (const item of lerPendentes().filter(x => forcar || Date.now() >= x.liberarEm).slice(0, 20)) {
+    const executar = async () => {
+      // Reenviar ignora só o backoff; nunca antecipa a janela de confirmação nativa.
+      // Reconsulta após cada await para priorizar cancelamento recebido durante um POST.
+      for (let n = 0; n < 20; n++) {
+        const item = lerPendentes().find(x => Date.now() >= x.liberarEm);
+        if (!item) break;
         let r, obj = null;
+        const controle = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const limite = controle ? setTimeout(() => controle.abort(), 15000) : null;
         try {
-          r = await nativeFetch(API + '/v1/events', {
-            method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store', keepalive: true,
+          r = await nativeFetch(API + (item.operacao === 'desfazer' ? '/v1/events/desfazer' : '/v1/events'), {
+            method: 'POST', mode: 'cors', credentials: 'omit', keepalive: true,
+            signal: controle?.signal,
             headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Accept': 'application/json', 'X-OM30-Key': KEY },
             body: JSON.stringify(item.evento)
           });
           obj = await r.json().catch(() => null);
-        } catch (e) { stats.errosEnvio++; console.warn('[OM30 D1] Sem rede; envio mantido para depois.'); break; }
-        const tirar = () => gravarPendentes(lerPendentes().filter(x => x.evento.eventId !== item.evento.eventId));
-        if (r.ok && obj?.ok) { tirar(); stats.enviadas++; stats.ultimo = { estado: 'GRAVADO_NO_D1', origem: item.evento.origem, em: new Date().toISOString() }; console.info('[OM30 D1] Ausência registrada:', item.evento.origem); continue; }
-        if (r.status === 422 || r.status === 400) { tirar(); stats.recusadas++; stats.ultimo = { estado: 'RECUSADO_PELO_WORKER', http: r.status, motivo: obj?.error || '' }; console.warn('[OM30 D1] Evento recusado:', r.status, obj?.error || ''); continue; }
-        stats.errosEnvio++; stats.ultimo = { estado: 'ERRO_ENVIO', http: r.status, motivo: obj?.error || '' };
-        console.warn('[OM30 D1] Erro ao gravar:', r.status, obj?.error || '');
-        break;
+        } catch { stats.errosEnvio++; adiarEnvio(); stats.ultimo = { estado: 'SEM_REDE_ENVIO_PENDENTE' }; break; }
+        finally { if (limite !== null) clearTimeout(limite); }
+        if (r.ok && obj?.ok) {
+          // Mantém apenas o necessário para correlacionar eventual desfazer tardio (72h).
+          guardarItem({ ...item, enviadoEm: Date.now(), ...(obj.cancelado === true ? { cancelado: true } : {}), evento: {
+            eventId: item.evento.eventId, atendimentoId: item.evento.atendimentoId,
+            tipo: item.evento.tipo, observadoEm: item.evento.observadoEm
+          } });
+          if (item.operacao === 'desfazer') {
+            const alvo = todosItens().find(x => x.operacao !== 'desfazer' && x.evento.eventId === item.evento.eventId);
+            if (alvo) guardarItem({ ...alvo, cancelado: true, enviadoEm: Date.now(), evento: {
+              eventId: alvo.evento.eventId, atendimentoId: alvo.evento.atendimentoId,
+              tipo: alvo.evento.tipo, observadoEm: alvo.evento.observadoEm
+            } });
+          }
+          falhasConsecutivas = 0; proximoEnvio = 0;
+          try { localStorage.removeItem(CHAVE_RETRY); } catch {}
+          stats.enviadas++; stats.ultimo = { estado: item.operacao === 'desfazer' ? 'DESFEITA_NO_D1' : obj.cancelado === true ? 'CANCELADO_NO_D1' : 'GRAVADO_NO_D1', em: new Date().toISOString() };
+          invalidarOrigens(); continue;
+        }
+        if (r.status === 422 || r.status === 400) {
+          // Recusas permanecem disponíveis ao suporte, sem repetição de escrita inválida.
+          guardarItem({ ...item, recusado: true, recusadoEm: Date.now(), http: r.status });
+          stats.recusadas++; stats.ultimo = { estado: 'RECUSADO_PELO_WORKER', http: r.status }; continue;
+        }
+        stats.errosEnvio++; stats.ultimo = { estado: 'ERRO_ENVIO', http: r.status };
+        adiarEnvio(); break;
       }
+    };
+    try {
+      if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+        try { await navigator.locks.request('om30:ausencias-envio:v6', { ifAvailable: true }, async lock => { if (lock) await executar(); }); }
+        catch { await executar(); } // API indisponível neste contexto: a idempotência continua no Worker.
+      } else await executar(); // UUID estável: o Worker deduplica qualquer repetição após falha.
     } finally { enviando = false; }
   }
 
@@ -225,7 +341,21 @@
     proto.send = function(body) {
       let req = null;
       try { const m = this.__om30AusD1; req = m ? reconhecer(m.url, m.method, body) : null; } catch {}
-      if (req) this.addEventListener('loadend', () => registrar(req, this.status >= 200 && this.status < 300), { once: true });
+      if (req) {
+        // A identidade é capturada na solicitação, antes que navegação altere a tela.
+        req.autor = profissionalLogado(); req.local = localAtual();
+        this.addEventListener('loadend', () => {
+          let data = null;
+          try {
+            if (this.responseType === 'json') data = this.response;
+            else if (!this.responseType || this.responseType === 'text') {
+              const texto = String(this.responseText || '').trim();
+              if (texto.startsWith('{')) data = JSON.parse(texto);
+            }
+          } catch { registrar(req, false); return; }
+          registrar(req, this.status >= 200 && this.status < 300 && !(data && (data.ok === false || data.success === false)));
+        }, { once: true });
+      }
       return mandar.call(this, body);
     };
     try { Object.defineProperty(proto, '__om30AusenciasD1', { value: true }); } catch { proto.__om30AusenciasD1 = true; }
@@ -241,71 +371,197 @@
   }
   if (SETOR) setTimeout(lerModelos, 3000);
 
-  let memo = { t: 0, chave: '', mapa: null };
+// Cache somente em memória: separa histórico de presença e compartilha entre abas da mesma origem.
+  const leituras = new Map(), emLeitura = new Map();
+  const epocas = { origem: 0, presenca: 0 }, invalidadoEm = { origem: 0, presenca: 0 };
+  const recuos = { origem: { falhas: 0, ate: 0 }, presenca: { falhas: 0, ate: 0 } };
+  const LIMITE_HTTP = 300, CACHE_ORIGEM_MS = 20000, CACHE_PRESENCA_MS = 5000;
+  let canal = null;
+  const chaveItem = x => x.tipo + '#' + x.id;
+  const instanteServidor = valor => {
+    if (typeof valor === 'number') return valor < 1e12 ? valor * 1000 : valor;
+    return new Date(valor).getTime() || 0; // Date.parse é substituído pelo Saúde Simples.
+  };
+  function normalizar(itens, origem = false) {
+    return [...new Map((itens || []).map(x => ({ id: String(x?.id || ''), tipo: x?.tipo || (origem ? 'AtendimentoPa' : '') }))
+      .filter(x => validId(x.id) && validTipo(x.tipo)).map(x => [chaveItem(x), x])).values()]
+      .sort((a, b) => chaveItem(a).localeCompare(chaveItem(b)));
+  }
+  function transmitir(mensagem) { try { canal?.postMessage(mensagem); } catch {} }
+  function invalidar(classe, publicar = true) {
+    epocas[classe]++; invalidadoEm[classe] = Date.now(); recuos[classe].ate = 0;
+    for (const [chave, registro] of leituras) if (registro.classe === classe) leituras.delete(chave);
+    if (publicar) transmitir({ acao: 'invalidar', classe });
+  }
+  function guardar(chave, registro, publicar = true) {
+    if (registro.inicio < invalidadoEm[registro.classe]) return;
+    const anterior = leituras.get(chave);
+    if (anterior && anterior.em > registro.em) return;
+    leituras.delete(chave); leituras.set(chave, registro);
+    while (leituras.size > 32) leituras.delete(leituras.keys().next().value);
+    if (publicar) transmitir({ acao: 'cache', chave, registro });
+  }
+  try {
+    canal = typeof BroadcastChannel === 'function' ? new BroadcastChannel('om30:leituras:v1') : null;
+    if (canal) canal.onmessage = ({ data: m }) => {
+      if (!m || !['origem', 'presenca'].includes(m.classe || m.registro?.classe)) return;
+      if (m.acao === 'invalidar') invalidar(m.classe, false);
+      else if (m.acao === 'cache' && typeof m.chave === 'string' && Array.isArray(m.registro?.entradas)) guardar(m.chave, m.registro, false);
+      else if (m.acao === 'consultar') {
+        const registro = leituras.get(m.chave);
+        if (registro && Date.now() - registro.em < (registro.classe === 'origem' ? CACHE_ORIGEM_MS : CACHE_PRESENCA_MS))
+          transmitir({ acao: 'cache', chave: m.chave, registro });
+      }
+    };
+  } catch { canal = null; }
+  window.addEventListener('om30:ausencias-alteradas', () => invalidar('origem'));
+  function mapaDoRegistro(registro, classe, falhou = false) {
+    const mapa = new Map(), agora = Date.now();
+    if (registro) for (const [chave, valor] of registro.entradas) {
+      // Worker antigo pode não devolver expiração: valor só é usado na resposta de sucesso, sem prorrogação em erro.
+      if (classe === 'presenca' && valor.validoAte && !(valor.validoAte > agora)) continue;
+      if (classe === 'presenca' && falhou && !valor.validoAte) continue;
+      if (classe === 'origem' && agora - registro.em >= CACHE_ORIGEM_MS) continue;
+      mapa.set(chave, { ...valor });
+    }
+    mapa.consultaOk = !falhou;
+    return mapa;
+  }
+  async function postar(caminho, corpo, keepalive = false) {
+    const controle = new AbortController();
+    const timer = setTimeout(() => controle.abort(), 10000);
+    try {
+      const r = await nativeFetch(API + caminho, {
+        method: 'POST', mode: 'cors', credentials: 'omit', keepalive, signal: controle.signal,
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Accept': 'application/json', 'X-OM30-Key': KEY },
+        body: JSON.stringify(corpo)
+      });
+      const obj = await r.json().catch(() => null);
+      if (!r.ok || !obj?.ok) throw new Error('HTTP ' + r.status + ' ' + (obj?.error || 'RESPOSTA_INVALIDA'));
+      return obj;
+    } finally { clearTimeout(timer); }
+  }
+  function nomeTrava(chave) {
+    let hash = 2166136261;
+    for (let i = 0; i < chave.length; i++) hash = Math.imul(hash ^ chave.charCodeAt(i), 16777619);
+    return 'om30:leitura:' + (hash >>> 0) + ':' + chave.length;
+  }
+  async function consultarLote(classe, lista, forcar = false) {
+    const chave = classe + ':' + lista.map(chaveItem).join(',');
+    const ttl = classe === 'origem' ? CACHE_ORIGEM_MS : CACHE_PRESENCA_MS;
+    const emCache = () => { const r = leituras.get(chave); return r && Date.now() - r.em < ttl ? r : null; };
+    const fresco = emCache();
+    if (fresco && !forcar) return mapaDoRegistro(fresco, classe);
+    if (emLeitura.has(chave)) {
+      if (!forcar) return emLeitura.get(chave);
+      await emLeitura.get(chave); // ação precisa de consulta iniciada depois da anterior.
+    }
+    const executar = async () => {
+      let r = forcar ? null : emCache();
+      if (!r && canal && !forcar) {
+        transmitir({ acao: 'consultar', classe, chave });
+        await new Promise(resolve => setTimeout(resolve, 40));
+        r = emCache();
+      }
+      if (r) return mapaDoRegistro(r, classe);
+      if (!forcar && Date.now() < recuos[classe].ate) return mapaDoRegistro(leituras.get(chave), classe, true);
+      const inicio = Date.now(), epoca = epocas[classe];
+      try {
+        const obj = await postar(classe === 'origem' ? '/v1/lookup' : '/v1/presenca/lote', { atendimentos: lista });
+        if (epoca !== epocas[classe]) return mapaDoRegistro(null, classe, true);
+        const entradas = [], solicitados = new Set(lista.map(chaveItem));
+        const dados = classe === 'origem' ? obj.encontrados : obj.presentes;
+        if (!Array.isArray(dados)) throw new Error('RESPOSTA_INVALIDA');
+        for (const p of dados) {
+          if (!solicitados.has(p.atendimento)) continue;
+          if (classe === 'origem') {
+            if (p.origem === 'MEDICO' || p.origem === 'ACOLHIMENTO') entradas.push([p.atendimento,
+              { origem: p.origem, por: limpo(p.por, 80), local: limpo(p.local, 60), em: p.registradoEm || null, eventId: p.eventId || null }]);
+          } else if (p.por) {
+            // Expiração real da concessão, nunca inferida de "desde" (início do atendimento).
+            const expira = instanteServidor(p.expiresAt), servidor = instanteServidor(obj.serverNow);
+            const validoAte = expira ? (servidor ? inicio + Math.max(0, expira - servidor) : expira) : 0;
+            if (!validoAte || validoAte > Date.now()) entradas.push([p.atendimento,
+              { por: limpo(p.por, 80), local: limpo(p.local, 60), setor: p.setor, desde: p.desde, validoAte }]);
+          }
+        }
+        const registro = { classe, inicio, em: Date.now(), entradas };
+        guardar(chave, registro); recuos[classe] = { falhas: 0, ate: 0 };
+        stats[classe === 'origem' ? 'ultimaConsulta' : 'ultimaPresenca'] = { ok: true, consultados: lista.length, encontrados: entradas.length, em: new Date().toISOString() };
+        return mapaDoRegistro(registro, classe);
+      } catch (e) {
+        const recuo = recuos[classe]; recuo.falhas++;
+        recuo.ate = Date.now() + Math.min(60000, 5000 * 2 ** Math.min(recuo.falhas - 1, 4));
+        stats[classe === 'origem' ? 'ultimaConsulta' : 'ultimaPresenca'] = { ok: false, erro: String(e?.message || e), em: new Date().toISOString() };
+        return mapaDoRegistro(leituras.get(chave), classe, true);
+      }
+    };
+    const promessa = (async () => {
+      // A chave completa continua no cache: colisão de hash só serializa duas leituras distintas.
+      if (canal && navigator.locks?.request) {
+        try { return await navigator.locks.request(nomeTrava(chave), executar); } catch { return executar(); }
+      }
+      return executar();
+    })();
+    emLeitura.set(chave, promessa);
+    try { return await promessa; } finally { if (emLeitura.get(chave) === promessa) emLeitura.delete(chave); }
+  }
+  async function consultarTodos(classe, itens, forcar = false) {
+    const lista = normalizar(itens, classe === 'origem'), mapa = new Map();
+    mapa.consultaOk = true;
+    mapa.consultadosOk = new Set();
+    // O Worker divide o SQL. Aqui dividimos apenas conjuntos acima do contrato HTTP, sem omitir pacientes.
+    for (let i = 0; i < lista.length; i += LIMITE_HTTP) {
+      const parte = await consultarLote(classe, lista.slice(i, i + LIMITE_HTTP), forcar);
+      if (!parte.consultaOk) mapa.consultaOk = false;
+      else for (const item of lista.slice(i, i + LIMITE_HTTP)) mapa.consultadosOk.add(chaveItem(item));
+      for (const [k, v] of parte) mapa.set(k, v);
+    }
+    return mapa;
+  }
   window.OM30Ausencias = {
     versao: BUILD,
-    diagnostico: () => { if (SETOR && !modelos.length) lerModelos(); return { ...stats, pendentes: lerPendentes().length }; },
+    diagnostico: () => { if (SETOR && !modelos.length) lerModelos(); const itens = todosItens(); return { ...stats, pendentes: lerPendentes().length, recusadosLocais: itens.filter(x => x.recusado).length, pendentesEmMemoria: reservaMemoria.size }; },
     reenviar: () => enviar(true),
     health: () => nativeFetch(API + '/health', { credentials: 'omit' }).then(r => r.json()),
-    // Consulta em lote. Entrada: [{id, tipo}]. Saída: Map("tipo#id" -> { origem, por, local, em }).
-    // Falha de rede/Cloudflare devolve Map vazio: a lista segue o caminho antigo, sem aviso na tela.
-    origens: async itens => {
-      const lista = [...new Map((itens || []).filter(x => validId(String(x?.id || '')))
-        .map(x => [`${x.tipo || 'AtendimentoPa'}#${x.id}`, { id: String(x.id), tipo: x.tipo || 'AtendimentoPa' }])).values()].slice(0, 300);
-      const mapa = new Map();
-      if (!lista.length) return mapa;
-      const chave = lista.map(x => x.tipo + '#' + x.id).sort().join(',');
-      if (memo.mapa && memo.chave === chave && Date.now() - memo.t < 15000) return memo.mapa;
-      try {
-        const r = await nativeFetch(API + '/v1/lookup', {
-          method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store',
-          headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Accept': 'application/json', 'X-OM30-Key': KEY },
-          body: JSON.stringify({ atendimentos: lista })
-        });
-        const obj = await r.json().catch(() => null);
-        if (!r.ok || !obj?.ok) { stats.ultimaConsulta = { http: r.status, motivo: obj?.error || '' }; return mapa; }
-        for (const e of obj.encontrados || []) if (e.atendimento && (e.origem === 'MEDICO' || e.origem === 'ACOLHIMENTO'))
-          mapa.set(e.atendimento, { origem: e.origem, por: limpo(e.por, 80), local: limpo(e.local, 60), em: e.registradoEm || null });
-        stats.ultimaConsulta = { http: r.status, consultados: lista.length, encontrados: mapa.size, em: new Date().toISOString() };
-        memo = { t: Date.now(), chave, mapa };
-      } catch (e) { stats.ultimaConsulta = { erro: String(e?.message || e) }; }
-      return mapa;
-    }
+    origens: (itens, opcoes = {}) => consultarTodos('origem', itens, opcoes.forcar === true)
   };
-  // ---------- presença (quem está com a ficha aberta) ----------
-  async function postar(caminho, corpo, keepalive = false) {
-    const r = await nativeFetch(API + caminho, {
-      method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store', keepalive,
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Accept': 'application/json', 'X-OM30-Key': KEY },
-      body: JSON.stringify(corpo)
-    });
-    const obj = await r.json().catch(() => null);
-    if (!r.ok || !obj?.ok) throw new Error(`HTTP ${r.status} ${obj?.error || ''}`);
-    return obj;
+  const marcacoes = new Map(), sequencias = new Map();
+  function versaoPresenca(tag) {
+    if (!/^[0-9a-f-]{36}$/i.test(tag.sessionId || '')) tag.sessionId = crypto.randomUUID();
+    const chave = 'om30:presenca:seq:' + tag.sessionId;
+    let salvo = 0;
+    try { salvo = Number(sessionStorage.getItem(chave)) || 0; } catch {}
+    const sequencia = Math.max(salvo, sequencias.get(chave) || 0) + 1;
+    sequencias.set(chave, sequencia);
+    try { sessionStorage.setItem(chave, String(sequencia)); } catch {}
+    return { sessionId: tag.sessionId, sequencia };
   }
   window.OM30Ausencias.presenca = {
-    marcar: ({ id, tipo, setor, local }) => postar('/v1/presenca', { atendimentoId: String(id), tipo, setor, local: limpo(local, 60),
-      autor: profissionalLogado(), ttlSeg: 150 }),
-    fim: ({ id, tipo }, keepalive = false) => postar('/v1/presenca/fim', { atendimentoId: String(id), tipo, autor: profissionalLogado() }, keepalive),
-    // Entrada: [{id, tipo}]. Saída: Map("tipo#id" -> { por, local, setor, desde }). Falha devolve Map vazio.
-    lote: async itens => {
-      const lista = [...new Map((itens || []).filter(x => validId(String(x?.id || '')) && validTipo(x?.tipo))
-        .map(x => [`${x.tipo}#${x.id}`, { id: String(x.id), tipo: x.tipo }])).values()].slice(0, 300);
-      const mapa = new Map();
-      if (!lista.length) return mapa;
-      try {
-        const obj = await postar('/v1/presenca/lote', { atendimentos: lista });
-        for (const p of obj.presentes || []) if (p.atendimento && p.por) mapa.set(p.atendimento, { por: limpo(p.por, 80), local: limpo(p.local, 60), setor: p.setor, desde: p.desde });
-      } catch (e) { stats.ultimaPresenca = String(e?.message || e); }
-      return mapa;
-    }
+    marcar: tag => {
+      const { id, tipo, setor, local } = tag;
+      const chave = tipo + '#' + id, anterior = marcacoes.get(chave);
+      if (anterior) return anterior;
+      const promessa = postar('/v1/presenca', { atendimentoId: String(id), tipo, setor, local: limpo(local, 60),
+        autor: profissionalLogado(), ttlSeg: 150, ...versaoPresenca(tag) }).then(obj => { invalidar('presenca'); return obj; });
+      marcacoes.set(chave, promessa);
+      return promessa.finally(() => { if (marcacoes.get(chave) === promessa) marcacoes.delete(chave); });
+    },
+    fim: async (tag, keepalive = false) => {
+      const { id, tipo } = tag;
+      // Envia imediatamente com sequência maior: o Worker rejeita a renovação antiga que chegue depois.
+      // Não aguarda rede antes do keepalive, pois a aba pode fechar agora.
+      const obj = await postar('/v1/presenca/fim', { atendimentoId: String(id), tipo, autor: profissionalLogado(), ...versaoPresenca(tag) }, keepalive);
+      invalidar('presenca'); return obj;
+    },
+    lote: itens => consultarTodos('presenca', itens)
   };
   window.OM30Ausencias.profissionalLogado = profissionalLogado;
 
   window.addEventListener('online', () => void enviar());
   setInterval(() => { if (lerPendentes().some(x => Date.now() >= x.liberarEm)) void enviar(); }, 5000);
   setTimeout(() => void enviar(), 3000);
-  console.info('[OM30 D1] Coletor V5 ativo', SETOR ? `(${SETOR})` : '');
+  console.info('[OM30 D1] Coletor V5.3 ativo', SETOR ? `(${SETOR})` : '');
 })();
 // ===== FIM OM30 AUSÊNCIAS D1 =====
 
@@ -380,7 +636,28 @@
       if (/^\d{1,14}$/.test(id || '') && /^[A-Z][A-Za-z]{2,40}$/.test(tipo || '')) tag = { id, tipo, setor: 'ACOLHIMENTO', local: '', em: Date.now() };
     }
     if (tag && /^\/(acolhimentos|prontuarios|atendimentos|atendimentos_pas)(\/|$)/.test(caminho)) {
-      let ativo = true;
+      let ativo = true, encerrada = false;
+      if (!/^[0-9a-f-]{36}$/i.test(tag.sessionId || '')) tag.sessionId = crypto.randomUUID();
+      window.name = textoTag(tag);
+      // Uma aba duplicada pelo navegador pode copiar window.name/sessionStorage. A aba já ativa conserva a sessão.
+      let canalFicha = null;
+      const dono = crypto.randomUUID();
+      try {
+        canalFicha = typeof BroadcastChannel === 'function' ? new BroadcastChannel('om30:presenca:fichas:v1') : null;
+        if (canalFicha) {
+          canalFicha.onmessage = ({ data: m }) => {
+            if (!m || m.sessionId !== tag.sessionId) return;
+            if (m.acao === 'ocupar' && ativo && m.dono !== dono) canalFicha.postMessage({ acao: 'ocupada', sessionId: tag.sessionId, destino: m.dono });
+            if (m.acao === 'ocupada' && m.destino === dono) { tag.sessionId = crypto.randomUUID(); window.name = textoTag(tag); }
+          };
+          canalFicha.postMessage({ acao: 'ocupar', sessionId: tag.sessionId, dono });
+        }
+      } catch { canalFicha = null; }
+      const encerrar = () => {
+        if (encerrada) return;
+        encerrada = true; ativo = false;
+        try { Promise.resolve(api()?.fim(tag, true)).catch(() => {}); } catch {}
+      };
       const marcar = async (tentativa = 0) => {
         if (!ativo) return;
         if (!api() || !usuarioLogado()) { if (tentativa < 20) setTimeout(() => marcar(tentativa + 1), 1000); return; }
@@ -388,21 +665,23 @@
       };
       setTimeout(marcar, 800);
       setInterval(marcar, 45000);
-      // Fechou a aba (ou saiu da página): encerra já; se for só navegação dentro da ficha, a próxima página remarca.
-      window.addEventListener('pagehide', () => { ativo = false; try { api()?.fim(tag, true); } catch {} });
+      // pagehide também ocorre em Salvar/recarregar/navegar: não equivale a atendimento encerrado.
+      // Fechamento sem confirmação nativa deixa de renovar e vence pelo TTL do servidor (150 s).
+      window.addEventListener('pagehide', () => { ativo = false; });
+      window.addEventListener('pageshow', () => { if (!encerrada) { ativo = true; void marcar(); } });
       window.OM30PresencaFicha = { tag };
       // "Sair" da ficha (aba aberta pelo script): assim que o Saúde Simples desvincula a senha, fecha a aba na
       // hora, sem esperar a lista recarregar. Se a desvinculação falhar, segue o fluxo nativo.
-      if (window.opener && !window.opener.closed) {
+      {
         const instalarSair = () => {
           const f = window.desvincularSenha;
           if (typeof f !== 'function') return false;
           if (f.__om30Sair) return true;
           const novo = function (...args) {
             return Promise.resolve(f.apply(this, args)).then(r => {
-              ativo = false;
-              try { api()?.fim(tag, true); } catch {}
-              try { window.close(); } catch {}
+              if (r === false || r?.ok === false || r?.success === false || r?.data?.ok === false || r?.data?.success === false) return r;
+              encerrar();
+              if (window.opener && !window.opener.closed) { try { window.close(); } catch {} }
               return r;
             });
           };
@@ -427,13 +706,14 @@
     if (t) {
       window.name = '';
       const abaFilha = !!window.opener && !window.opener.closed;
-      const fechar = () => { try { api()?.fim(t, true); } catch {} if (abaFilha) setTimeout(() => { try { window.close(); } catch {} }, 400); };
+      const fechar = () => { try { Promise.resolve(api()?.fim(t, true)).catch(() => {}); } catch {} if (abaFilha) setTimeout(() => { try { window.close(); } catch {} }, 400); };
       if (api()) fechar(); else setTimeout(fechar, 1200);
       if (abaFilha) return;
     }
   }
 
-  const CICLO_MS = 20000, VALIDADE_SENHA_MS = 45000, MAX_POR_CICLO = 15;
+  const CICLO_MS = 20000, VALIDADE_SENHA_MS = 45000, VALIDADE_CHAMADA_MS = 90000, MAX_POR_CICLO = 15;
+  const tentativasSenha = new Map(), revisoesChamada = new Map();
   const chamadas = new Map();   // "Tipo#id" -> { estado, nome, guiche, t }   (Senha Simples)
   let presencas = new Map();    // "Tipo#id" -> { por, local, desde }        (D1)
   const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
@@ -466,12 +746,12 @@
   function abrirFicha(url, id, tipo, nome) {
     if (!/^\d{1,14}$/.test(String(id || '')) || !/^[A-Z][A-Za-z]{2,40}$/.test(tipo || '')) return 'SEM_ID';
     // O nome do paciente fica só na marca da aba (título); nunca é enviado ao Cloudflare.
-    const tag = { id: String(id), tipo, setor: SETOR, local: localNome(), nome: nomeDoPaciente(id, tipo, nome), em: Date.now() };
+    const tag = { id: String(id), tipo, setor: SETOR, local: localNome(), nome: nomeDoPaciente(id, tipo, nome), em: Date.now(), sessionId: crypto.randomUUID() };
     let janela = null;
     try { janela = window.open(url, textoTag(tag)); } catch { janela = null; }
     if (janela) {
-      presencas.set(`${tipo}#${id}`, { por: usuarioLogado(), local: tag.local, desde: new Date().toISOString() });
-      agendarPintura();
+      // O estado Em atendimento só será exibido após confirmação da ficha no Worker.
+      setTimeout(() => void ciclo(), 1800);
       return 'NOVA_ABA';
     }
     window.name = textoTag(tag);   // navegador bloqueou: segue na mesma aba, que leva a marca
@@ -517,7 +797,11 @@
     const fn = typeof senhaSimplesGetSenhaAtendimento === 'function' ? senhaSimplesGetSenhaAtendimento : null;   // eslint-disable-line no-undef
     if (!fn) return null;
     try {
-      const { data: s } = await fn({ localAtendimentoAtualId: local, params: { atendimento_id: id, atendimento_type: tipo } });
+      let timer;
+      const { data: s } = await Promise.race([
+        fn({ localAtendimentoAtualId: local, params: { atendimento_id: id, atendimento_type: tipo } }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('TIMEOUT_SENHA')), 8000); })
+      ]).finally(() => clearTimeout(timer));
       if (!s?.chamado_em && !s?.confirmado_em) return { estado: 'AGUARDANDO' };
       return { estado: s.confirmado_em ? 'ATENDENDO' : 'CHAMADO', nome: limpo(s.usuario?.nome), guiche: limpo(s.local_atendimento?.nome) };
     } catch (e) {
@@ -536,9 +820,12 @@
     const s = data && typeof data === 'object' ? (data.saude_atendimento_id ? data : data.senha && typeof data.senha === 'object' ? data.senha : null) : null;
     if (!s?.saude_atendimento_id || !s?.saude_atendimento_type) return;
     const chave = `${s.saude_atendimento_type}#${s.saude_atendimento_id}`;
+    revisoesChamada.set(chave, (revisoesChamada.get(chave) || 0) + 1);
     if (/desvincular|concluir|retornar/i.test(url)) chamadas.delete(chave);
     else if (s.chamado_em || s.confirmado_em || /chamar|proximo/i.test(url))
-      chamadas.set(chave, { estado: 'CHAMADO', nome: limpo(s.usuario?.nome) || usuarioLogado(), guiche: limpo(s.local_atendimento?.nome) || localNome(), t: Date.now() });
+      chamadas.set(chave, { estado: s.confirmado_em ? 'CONFIRMADO' : 'CHAMADO',
+        nome: limpo(s.usuario?.nome) || (/chamar|proximo/i.test(url) ? usuarioLogado() : ''),
+        guiche: limpo(s.local_atendimento?.nome) || (/chamar|proximo/i.test(url) ? localNome() : ''), t: Date.now() });
     else return;
     agendarPintura();
   }
@@ -591,22 +878,48 @@
     return [...tr.cells].find(td => nome && limpo(td.textContent).toUpperCase().startsWith(nome)) || tr.cells[2] || null;
   }
 
+  // OM30 visual do profissional: estado + nome completo e local, sem novas consultas.
+  function om30ProfessionalName(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (!text || text !== text.toLocaleUpperCase('pt-BR')) return text;
+  const links = new Set(['da', 'das', 'de', 'do', 'dos', 'e']);
+  return text.toLocaleLowerCase('pt-BR').split(' ').map((word, i) =>
+    i && links.has(word) ? word : word.charAt(0).toLocaleUpperCase('pt-BR') + word.slice(1)
+  ).join(' ');
+}
+  function om30ProfessionalMarkup(name, location, attending) {
+  const safe = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
+  const displayName = om30ProfessionalName(name);
+  if (!displayName) return '';
+  const displayLocation = om30ProfessionalName(location);
+  const state = attending ? 'Em atendimento' : 'Chamado por';
+  return `<span class="om30-prof-corpo"><span class="om30-prof-estado"><span class="om30-prof-ponto" aria-hidden="true"></span>${state}</span><span class="om30-prof-detalhes"><span class="om30-prof-nome">${safe(displayName)}</span>${displayLocation ? `<span class="om30-prof-local">${safe(displayLocation)}</span>` : ''}</span></span>`;
+}
+
+  let tValidadeVisual = 0;
+  function agendarValidadeVisual() {
+    clearTimeout(tValidadeVisual);
+    const agora = Date.now(), prazos = [];
+    for (const p of presencas.values()) if (p.validoAte > agora) prazos.push(p.validoAte);
+    for (const c of chamadas.values()) if (c.t + VALIDADE_CHAMADA_MS > agora) prazos.push(c.t + VALIDADE_CHAMADA_MS);
+    if (prazos.length) tValidadeVisual = setTimeout(() => { const vm = colecao(); if (!document.hidden && vm) pintar(vm); }, Math.max(1, Math.min(...prazos) - agora));
+  }
   function pintar(vm) {
     const tbody = vm?.$el?.querySelector?.('tbody');
     if (!tbody) return;
     const vistos = new Set();
     const linhas = mapaLinhas(tbody);
     for (const it of itensValidos(vm)) {
-      const p = presencas.get(it.atendimento_str);
-      const c = !p && chamadas.get(it.atendimento_str);
+      const atual = presencas.get(it.atendimento_str);
+      const p = atual && (!atual.validoAte || atual.validoAte > Date.now()) ? atual : null;
+      const ultima = !p && chamadas.get(it.atendimento_str);
+      const c = ultima && Date.now() - ultima.t < VALIDADE_CHAMADA_MS ? ultima : null;
       if (!p?.por && !c?.nome) continue;
       const td = celulaDoItem(linhas, it);
       if (!td) continue;
       let box = td.querySelector(':scope > .om30-prof-fila');
       if (!box) { box = document.createElement('div'); td.appendChild(box); }
-      const html = p
-        ? `<span class="om30-prof-rot">Em atendimento:</span> <b>${esc(nomeVisual(p.por))}</b>${p.local ? ` · ${esc(localVisual(p.local))}` : ''}`
-        : `<span class="om30-prof-rot">Chamado por</span> <b>${esc(nomeVisual(c.nome))}</b>${c.guiche ? ` · ${esc(localVisual(c.guiche))}` : ''}`;
+      const html = om30ProfessionalMarkup(p ? p.por : c.nome, p ? p.local : c.guiche, !!p);
       const classe = `om30-prof-fila${p ? ' om30-prof-atendendo' : ''}`;
       if (box.__h !== html || box.className !== classe) {
         box.className = classe; box.innerHTML = html; box.__h = html;
@@ -615,6 +928,7 @@
       vistos.add(box);
     }
     for (const b of tbody.querySelectorAll('.om30-prof-fila')) if (!vistos.has(b)) b.remove();
+    agendarValidadeVisual();
   }
   // Título da fila: "📢 NOME · Acolhimento" com paciente chamado; senão "(N) Acolhimento" (🔴 se há vermelho).
   const NOME_TELA = TIPO === 'atendimento' ? 'Fila Médica' : 'Acolhimento';
@@ -645,21 +959,34 @@
       // Presença (uma consulta em lote ao D1).
       if (api() && itens.length) {
         const m = await api().lote(itens.map(it => { const [tipo, id] = it.atendimento_str.split('#'); return { id, tipo }; }));
+        // Falha não é lista vazia: só conserva concessões com expiração real ainda válida.
+        if (m.consultaOk === false) {
+          for (const [k, p] of presencas) if (ativos.has(k) && p.validoAte > Date.now() && !m.has(k) && !m.consultadosOk?.has(k)) m.set(k, p);
+        }
         presencas = m;
+        pintar(vm); // não espera consultas lentas de senha para mostrar a presença confirmada.
       }
-      // Chamadas: só pacientes com senha já chamados (fila ou capturados nesta tela), no máximo 15.
+      for (const [k, p] of presencas) if (!ativos.has(k) || (p.validoAte && p.validoAte <= Date.now())) presencas.delete(k);
+      // Chamadas: prioridade por tentativa mais antiga, inclusive quando a consulta falha.
+      // O limite 15 controla carga por ciclo, mas não deixa os últimos pacientes presos atrás dos primeiros.
       const local = localId(vm);
       if (local) {
         const agora = Date.now();
         const alvo = itens.filter(it => it.senha && (it.chamada_em || chamadas.has(it.atendimento_str)) && !presencas.has(it.atendimento_str))
-          .filter(it => !(chamadas.get(it.atendimento_str)?.t > agora - VALIDADE_SENHA_MS)).slice(0, MAX_POR_CICLO);
-        await Promise.all(alvo.map(async it => {
+          .filter(it => !(chamadas.get(it.atendimento_str)?.t > agora - VALIDADE_SENHA_MS))
+          .sort((a, b) => (tentativasSenha.get(a.atendimento_str) || 0) - (tentativasSenha.get(b.atendimento_str) || 0))
+          .slice(0, MAX_POR_CICLO);
+        // Três consultas nativas por vez. Não sobrescreve uma chamada capturada durante a consulta.
+        for (let i = 0; i < alvo.length; i += 3) await Promise.all(alvo.slice(i, i + 3).map(async it => {
+          const inicio = Date.now(), anterior = chamadas.get(it.atendimento_str), revisao = revisoesChamada.get(it.atendimento_str) || 0;
+          tentativasSenha.set(it.atendimento_str, inicio);
           const [tipo, id] = it.atendimento_str.split('#');
           const r = await consultarSenha(local, tipo, id);
-          if (r) chamadas.set(it.atendimento_str, { ...r, t: Date.now() });
+          if (r && chamadas.get(it.atendimento_str) === anterior && (revisoesChamada.get(it.atendimento_str) || 0) === revisao) chamadas.set(it.atendimento_str, { ...r, t: Date.now() });
         }));
       }
       for (const k of chamadas.keys()) if (!ativos.has(k)) chamadas.delete(k);
+      for (const k of tentativasSenha.keys()) if (!ativos.has(k)) tentativasSenha.delete(k);
       pintar(vm);
       atualizarTitulo(vm);
     } catch (e) { console.warn('[OM30 Profissional na fila]', e?.message || e); }
@@ -667,14 +994,12 @@
   }
 
   const css = document.createElement('style');
-  css.textContent = `.om30-prof-fila{display:block;margin-top:3px;font-size:11.5px;line-height:1.3;color:#1f5f8b;white-space:normal;overflow-wrap:anywhere}
-    .om30-prof-fila b{font-weight:600}.om30-prof-rot{color:#6c757d}
-    .om30-prof-fila.om30-prof-atendendo{color:#0f6b3a}.om30-prof-fila.om30-prof-atendendo .om30-prof-rot{color:#0f6b3a;font-weight:600}`;
+  css.textContent = "\n.om30-prof-fila{display:flex;box-sizing:border-box;width:fit-content;max-width:100%;margin-top:6px;padding:7px 10px;border:1px solid #b7c2cc;border-left:3px solid #718494;border-radius:7px;background:#eef2f5;color:#2f3740;text-align:left;white-space:normal;font-family:inherit;font-size:12px;line-height:1.35;letter-spacing:normal;text-transform:none}\n.om30-prof-fila .om30-prof-corpo{display:flex;flex-direction:column;min-width:0;gap:3px}\n.om30-prof-fila .om30-prof-estado{display:inline-flex;align-items:center;gap:6px;max-width:100%;font-size:12px;line-height:1.35;font-weight:700;color:#394f60}\n.om30-prof-fila .om30-prof-ponto{display:inline-block;box-sizing:border-box;flex:0 0 6px;width:6px;height:6px;border:1px solid currentColor;border-radius:50%}\n.om30-prof-fila .om30-prof-detalhes{display:flex;flex-wrap:wrap;align-items:baseline;min-width:0;column-gap:7px;row-gap:0}\n.om30-prof-fila .om30-prof-nome{display:block;min-width:0;max-width:100%;font-size:13px;line-height:1.4;font-weight:600;color:#26333e;overflow-wrap:anywhere}\n.om30-prof-fila .om30-prof-local{display:block;min-width:0;max-width:100%;font-size:11.5px;line-height:1.4;font-weight:400;color:#526371;overflow-wrap:anywhere}\n.om30-prof-fila .om30-prof-local::before{content:'·';padding-right:7px;color:#74838e}\n.om30-prof-fila.om30-prof-atendendo{border-color:#a8c6b8;border-left-color:#3d7f62;background:#eaf4ee}\n.om30-prof-fila.om30-prof-atendendo .om30-prof-estado{color:#285c41}\n.om30-prof-fila.om30-prof-atendendo .om30-prof-ponto{background:currentColor}\n@media(forced-colors:active){.om30-prof-fila{border:1px solid CanvasText;border-left-width:2px;background:Canvas;color:CanvasText}.om30-prof-fila .om30-prof-nome,.om30-prof-fila .om30-prof-estado,.om30-prof-fila .om30-prof-local,.om30-prof-fila .om30-prof-local::before{color:CanvasText}}\n";
   (document.head || document.documentElement).appendChild(css);
   setInterval(ciclo, CICLO_MS);
   setTimeout(ciclo, 3000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) void ciclo(); });
-  window.addEventListener('focus', () => void ciclo());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { agendarPintura(); void ciclo(); } });
+  window.addEventListener('focus', () => { agendarPintura(); void ciclo(); });
   // A fila é redesenhada pelo Vue/scripts: repinta do cache; paciente recém-chamado sem nome dispara consulta.
   let t = 0, ultimaRapida = 0;
   new MutationObserver(() => {
@@ -690,7 +1015,7 @@
   }).observe(document.documentElement, { childList: true, subtree: true });
   window.OM30ProfissionalFila = {
     status: () => ({ tela: TIPO, presencas: [...presencas.entries()], chamadas: [...chamadas.entries()] }),
-    atualizar: () => { chamadas.clear(); return ciclo(); }
+    atualizar: () => { for (const c of chamadas.values()) c.t = Math.min(c.t, Date.now() - VALIDADE_SENHA_MS); return ciclo(); }
   };
 })();
 // ===== FIM OM30 PROFISSIONAL NA FILA =====
@@ -699,7 +1024,7 @@
 (() => {
   'use strict';
 
-  // v2.3.8:
+  // v2.3.9:
   // - Origem da ausência registrada no Cloudflare D1 no momento em que o Saúde Simples confirma
   //   "Paciente ausente" (PUT nativo, resposta 2xx; descartada se o próprio sistema desfizer).
   // - Lista de ausentes consulta o D1 em lote: com registro, a origem vem do D1 (sem varrer guichês);
@@ -1676,7 +2001,7 @@
   //   3) recepção e salas (só se ainda não decidiu)
   // completo=true consulta todas (para o histórico nos detalhes).
   async function origemDoAusente(atendimentoId, tipo, unidade, { completo = false } = {}) {
-    const chave = SESSION_CACHE + atendimentoId;
+    const chave = SESSION_CACHE + tipo + '#' + atendimentoId;
     const cache = lerJSON(chave);
     if (!completo && cache.t && Date.now() - cache.t < CACHE_ORIGEM_MS) return cache;
 
@@ -1801,7 +2126,7 @@
   }
 
   async function origemRapida(atendimentoId, tipo, unidade, grupo, prof, comSenhaSimples) {
-    const chave = SESSION_CACHE + atendimentoId;
+    const chave = SESSION_CACHE + tipo + '#' + atendimentoId;
     const cache = lerJSON(chave);
     if (cache.t && cache.base === grupo && Date.now() - cache.t < CACHE_ORIGEM_MS) return cache;
 
@@ -3216,8 +3541,8 @@
       if (MODO_NUMERO !== 'SENHA' && f.senha && Date.now() - f.t < FICHA_MS) { r.senha = f.senha; r.senhaDaFicha = true; }
       else if (MODO_NUMERO !== 'SENHA' && !['ERRO', 'INDEFINIDO', 'PENDENTE'].includes(r.origem)) pedirSenhaFicha(tr);
     }
-    // Senha EM é da emergência, sempre.
-    if (/^EM/i.test(r.senha || '') && ['MEDICO', 'ACOLHIMENTO', 'OUTROS'].includes(r.origem)) {
+    // O número da senha não substitui o setor registrado no evento de ausência.
+    if (r.fonte !== 'D1' && /^EM/i.test(r.senha || '') && ['MEDICO', 'ACOLHIMENTO', 'OUTROS'].includes(r.origem)) {
       r.origem = 'EMERGENCIA';
       r.setor = 'Emergência';
       const em = (unidadeAtual?.filas || []).find(f => f.grupo === 'EMERGENCIA');
@@ -3227,8 +3552,8 @@
     tr.dataset.om30Fonte = r.fonte || '';
     tr.dataset.om30Erro = r.erroHttp || '';
     if (r.senha) tr.dataset.om30Senha = r.senha; else delete tr.dataset.om30Senha;
-    if (r.setor) tr.dataset.om30Setor = r.setor;
-    if (r.cat) tr.dataset.om30Cat = r.cat;
+    if (r.setor) tr.dataset.om30Setor = r.setor; else delete tr.dataset.om30Setor;
+    if (r.cat) tr.dataset.om30Cat = r.cat; else delete tr.dataset.om30Cat;
 
     // Coluna Senha
     const tdSenha = tr.querySelector('.om30a-td-senha');
@@ -3364,6 +3689,45 @@
     }
   }
 
+  // OM30_ORIGEM_SEGURA_BEGIN: somente o evento confirmado define o setor da ausência.
+  const origensConfirmadas = new Map();
+  async function origemConfirmadaDaLinha(inf, unidade, mapa, configurado) {
+    const chave = inf.tipo + '#' + inf.id;
+    let d1 = mapa.get(chave);
+    const consultaOk = mapa.consultaOk === true || mapa.consultadosOk?.has(chave) === true;
+    if (!d1 && !consultaOk) d1 = origensConfirmadas.get(chave);
+    if (consultaOk && !d1) origensConfirmadas.delete(chave);
+    if (d1 && ['MEDICO', 'ACOLHIMENTO'].includes(d1.origem)) {
+      if (origensConfirmadas.get(chave)?.em !== d1.em) {
+        try { localStorage.removeItem(SESSION_CACHE + inf.tipo + '#' + inf.id); } catch {}
+      }
+      origensConfirmadas.set(chave, { ...d1 });
+      const complemento = await origemRapida(inf.id, inf.tipo, unidade, d1.origem, null, configurado)
+        .catch(() => ({}));
+      return { ...complemento, origem: d1.origem, fonte: 'D1', atendimento: chave,
+        ausenteEm: d1.em || null, eventoId: d1.eventId || null, chamadoPor: d1.por || null, guiche: d1.local || null,
+        acao: 'Ausentado', consultaPendente: !consultaOk };
+    }
+    // Senha e histórico nativos continuam disponíveis. Especialidade, profissional ou
+    // passagem por uma fila não comprovam onde a ausência foi marcada.
+    const complemento = configurado
+      ? await origemDoAusente(inf.id, inf.tipo, unidade).catch(() => ({})) : {};
+    return { ...complemento, origem: 'INDEFINIDO', fonte: 'SEM_ORIGEM_CONFIRMADA',
+      atendimento: chave, setor: null, cat: null, chamadoPor: null, guiche: null,
+      acao: null, ausenteEm: null };
+  }
+  async function confirmarOrigemParaDevolver(inf, registro, origem) {
+    if (!inf?.id || !inf.tipo || registro?.fonte !== 'D1' || !registro.ausenteEm ||
+        registro.atendimento !== inf.tipo + '#' + inf.id || !window.OM30Ausencias?.origens) return false;
+    try {
+      const mapa = await window.OM30Ausencias.origens([inf], { forcar: true });
+      const atual = mapa.get(inf.tipo + '#' + inf.id);
+      return mapa.consultaOk === true && atual?.origem === origem && atual.em === registro.ausenteEm &&
+        (!registro.eventoId || atual.eventId === registro.eventoId);
+    } catch { return false; }
+  }
+  // OM30_ORIGEM_SEGURA_END
+
   async function classificarTodos(forcar = false) {
     if (verificando || !tabelaRef) return;
     verificando = true;
@@ -3395,25 +3759,18 @@
         .filter(x => !somenteHoje || linhaEhDeHoje(x.tr))   // antigos só quando "Somente hoje" estiver desmarcado
         .sort((a, b) => Number(linhaEhDeHoje(b.tr)) - Number(linhaEhDeHoje(a.tr)));
 
-      if (forcar) linhas.forEach(x => { try { localStorage.removeItem(SESSION_CACHE + x.inf.id); localStorage.removeItem(CHAVE_FICHA + x.inf.id); } catch {} });
+      if (forcar) linhas.forEach(x => { try { localStorage.removeItem(SESSION_CACHE + x.inf.tipo + '#' + x.inf.id); localStorage.removeItem(CHAVE_FICHA + x.inf.id); } catch {} });
       if (forcar) { tFim = 0; classificou = false; }
 
       // Origem registrada no D1 no momento da ausência (coletor OM30 D1). Uma consulta em lote;
       // sem registro (ou sem rede) segue exatamente o caminho anterior.
-      const origensD1 = window.OM30Ausencias?.origens ? await window.OM30Ausencias.origens(linhas.map(x => x.inf)).catch(() => new Map()) : new Map();
+      const consultaFalhou = () => Object.assign(new Map(), { consultaOk: false });
+      const origensD1 = window.OM30Ausencias?.origens ? await window.OM30Ausencias.origens(linhas.map(x => x.inf)).catch(consultaFalhou) : consultaFalhou();
 
       let feitos = 0;
       definirStatus(`Verificando 0/${linhas.length}`);
       await emParalelo(linhas, CONCORRENCIA, async ({ tr, inf }) => {
-        const p = mapaProf.get(inf.id);
-        const d1 = origensD1.get(`${inf.tipo}#${inf.id}`);
-        // Quem ausentou e onde: gravado no D1 no clique (não depende do Senha Simples).
-        const r = d1
-          ? { ...(await origemRapida(inf.id, inf.tipo, unidade, d1.origem, d1.origem === 'MEDICO' ? (p?.prof || null) : null, configurado)),
-              fonte: 'D1', ausenteEm: d1.em, ...(d1.por ? { chamadoPor: d1.por, guiche: d1.local, acao: 'Ausentado' } : {}) }
-          : p
-          ? await origemRapida(inf.id, inf.tipo, unidade, p.prof ? 'MEDICO' : 'ACOLHIMENTO', p.prof, configurado)
-          : configurado ? await origemDoAusente(inf.id, inf.tipo, unidade) : { origem: 'INDEFINIDO' };
+        const r = await origemConfirmadaDaLinha(inf, unidade, origensD1, configurado);
         marcarLinha(tr, r);
         feitos++;
         definirStatus(`Verificando ${feitos}/${linhas.length}`);
@@ -3528,7 +3885,8 @@
     const tr = a.closest('tr');
     const origem = tr?.dataset.om30Origem;
 
-    // Origem não confirmada: não bloqueia; segue a remoção nativa do Saúde Simples.
+    // Sem evento D1 confirmado, o script não escolhe uma fila: preserva a ação nativa.
+    if (tr?.dataset.om30Fonte !== 'D1') return;
     if (origem && !['ACOLHIMENTO', 'MEDICO', 'EMERGENCIA', 'OUTROS'].includes(origem)) return;
     if (!origem) {
       ev.preventDefault();
@@ -3570,6 +3928,8 @@
     if (removendo) return;
 
     const inf = infoLinha(tr);
+    const registro = inf?.id ? { ...detalhes.get(inf.id) } : null;
+    const categoriaDestino = tr.dataset.om30Cat;
     const nome = nomeDaLinha(tr);
     const ok = await dialogo({
       tipo: 'pergunta',
@@ -3583,11 +3943,19 @@
         { rotulo: 'Remover e devolver', valor: true, primario: true }
       ]
     });
-    if (!ok) return;
+    if (!ok || removendo) return;
 
     removendo = true;
-    definirStatus('Removendo ausência…');
+    definirStatus('Conferindo devolução…');
     try {
+      if (!await confirmarOrigemParaDevolver(inf, registro, origem) ||
+          tr.dataset.om30Cat !== categoriaDestino || tr.dataset.om30Origem !== origem ||
+          tr.dataset.om30Fonte !== 'D1') {
+        toast({ tipo: 'aviso', titulo: 'Atualize a lista', texto: 'Não foi possível confirmar a devolução. Atualize a lista e tente novamente.' });
+        void classificarTodos(true);
+        return;
+      }
+      definirStatus('Removendo ausência…');
       try {
         await removerAusenciaNativa(a.href);
       } catch (e) {
@@ -3602,8 +3970,8 @@
 
       definirStatus('Devolvendo senha…');
       try {
-        const senha = await devolverSenha(tr.dataset.om30Cat, inf.id, inf.tipo);
-        try { localStorage.removeItem(SESSION_CACHE + inf.id); } catch {}
+        const senha = await devolverSenha(categoriaDestino, inf.id, inf.tipo);
+        try { localStorage.removeItem(SESSION_CACHE + inf.tipo + '#' + inf.id); } catch {}
         await dialogo({
           tipo: 'sucesso',
           titulo: `Paciente devolvido ${ao}`,
