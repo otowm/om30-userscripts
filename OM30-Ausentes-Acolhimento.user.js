@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Ausentes Acolhimento e Fila Médica | Origem
 // @namespace    https://om30.com.br/
-// @version      2.4.3
+// @version      2.4.4
 // @description  Ausentes do acolhimento e da fila médica separados por origem (Acolhimento x Fila Médica x Outros), devolução da mesma senha ao remover a ausência e liberação de senha presa em outro profissional ao chamar.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Ausentes-Acolhimento.user.js
@@ -4758,11 +4758,12 @@
     if (ths[5]) ths[5].textContent = 'Idade';
   }
 
-  // ---- Filtro da fila do acolhimento (Preferencial / Retorno / Dentista) ----
+  // ---- Filtro da fila do acolhimento (Emergência / Preferencial / Retorno / Dentista) ----
   // Mesmo padrão da fila médica: card com quantidade + tempo médio; clicar filtra.
   const STORAGE_FILTRO_FILA_ACOLH = `${PREFIX}:filtro-fila-acolhimento`;
   const FILTROS_FILA_ACOLH = [
     { key: 'TODOS',        label: 'Na fila',      cor: '#6c757d' },
+    { key: 'EMERGENCIA',   label: 'Emergência',   cor: '#dc3545' },
     { key: 'PREFERENCIAL', label: 'Preferencial', cor: '#fd7e14' },
     { key: 'RETORNO',      label: 'Retorno',      cor: '#6f42c1' },
     { key: 'DENTISTA',     label: 'Dentista',     cor: '#0aa2c0' }
@@ -4773,6 +4774,7 @@
 
   // Regra da operação: o grupo vem do prefixo da senha (RT retorno, PF preferencial, DT dentista).
   const PREFIXO_SENHA_FILA_ACOLH = {
+    EMERGENCIA: /^EM\d/,
     RETORNO: /^RT\d/,
     PREFERENCIAL: /^PF\d/,
     DENTISTA: /^DT\d/
