@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Ausentes Acolhimento e Fila Médica | Origem
 // @namespace    https://om30.com.br/
-// @version      2.3.15
+// @version      2.4.1
 // @description  Ausentes do acolhimento e da fila médica separados por origem (Acolhimento x Fila Médica x Outros), devolução da mesma senha ao remover a ausência e liberação de senha presa em outro profissional ao chamar.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Ausentes-Acolhimento.user.js
@@ -29,7 +29,7 @@
 // Nada é mostrado ao profissional. Suporte: OM30Ausencias.diagnostico() no console.
 (() => {
   'use strict';
-  const BUILD = 'OM30-D1-V5.3-2026-10-26';
+  const BUILD = 'OM30-D1-V5.4-2026-11-07';
   if (window.__OM30_AUSENCIAS_D1__) return;   // o outro script OM30 já instalou o mesmo coletor
   const API = 'https://om30-ausencias.cloud-om30-2.workers.dev';
   const KEY = String.fromCharCode(65,67,106,90,81,57,71,82,56,86,115,82,79,107,83,113,107,100,54,76,55,86,67,82,53,114,71,84,80,117,68,72,70,104,76,88,86,109,116,82,98,112,87,81,86,55,121,71);
@@ -467,7 +467,7 @@
       if (!forcar && Date.now() < recuos[classe].ate) return mapaDoRegistro(leituras.get(chave), classe, true);
       const inicio = Date.now(), epoca = epocas[classe];
       try {
-        const obj = await postar(classe === 'origem' ? '/v1/lookup' : '/v1/presenca/lote', { atendimentos: lista });
+        const obj = await postar(classe === 'origem' ? '/v1/lookup' : '/v1/presenca/lote', classe === 'origem' || !SETOR ? { atendimentos: lista } : { atendimentos: lista, setor: SETOR });
         if (epoca !== epocas[classe]) return mapaDoRegistro(null, classe, true);
         const entradas = [], solicitados = new Set(lista.map(chaveItem));
         const dados = classe === 'origem' ? obj.encontrados : obj.presentes;
@@ -477,7 +477,8 @@
           if (classe === 'origem') {
             if (p.origem === 'MEDICO' || p.origem === 'ACOLHIMENTO') entradas.push([p.atendimento,
               { origem: p.origem, por: limpo(p.por, 80), local: limpo(p.local, 60), em: p.registradoEm || null, eventId: p.eventId || null }]);
-          } else if (p.por) {
+          } else if (p.por && (!SETOR || p.setor === SETOR)) {
+            // Cada tela só mostra a presença do próprio setor: ficha do Acolhimento não vira "Em atendimento" na fila médica.
             // Expiração real da concessão, nunca inferida de "desde" (início do atendimento).
             const expira = instanteServidor(p.expiresAt), servidor = instanteServidor(obj.serverNow);
             const validoAte = expira ? (servidor ? inicio + Math.max(0, expira - servidor) : expira) : 0;
@@ -564,6 +565,113 @@
   console.info('[OM30 D1] Coletor V5.3 ativo', SETOR ? `(${SETOR})` : '');
 })();
 // ===== FIM OM30 AUSÊNCIAS D1 =====
+
+// ===== OM30 SENHAS D1 — envio das chamadas (idêntico nos scripts de fila) =====
+// Manda cada chamada de senha (Acolhimento / Fila médica) para o Worker om30-senhas, que guarda o
+// histórico por senha: quem chamou, guichê/sala, horário, rechamadas. Nada do paciente é enviado.
+// Fila no localStorage; o servidor ignora repetidos. Desligado enquanto API/KEY estiverem vazios.
+// Suporte: OM30Senhas.diagnostico() no console.
+(() => {
+  'use strict';
+  if (window.__OM30_SENHAS_ENVIO__) return;
+  window.__OM30_SENHAS_ENVIO__ = true;
+  const API = 'https://ps.worker-senhas.workers.dev';   // Worker om30-senhas (conta Senhas PS).<conta>.workers.dev
+  const KEY = String.fromCharCode(83,52,86,67,112,89,48,67,119,115,103,119,109,45,89,82,110,65,102,105,67,53,97,55,65,104,51,120,82,54,80,118,89,84,69,116,102,76,106,104,69,100,66,109,116,104,104,108);   // chave do cliente (secret CLIENT_KEY do Worker)
+  const FILA = 'om30:senhas-d1:v1:fila';
+  const limpo = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const norm = v => limpo(v).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+  const st = { enfileirados: 0, enviados: 0, recusados: 0, erros: 0, falhas: 0, proximoEm: 0, ultimo: null };
+  // "senha|chamado_em" já enviados por este navegador (24 h, sobrevive a recarregar a página):
+  // cada página da fila reconsulta as senhas chamadas e, sem isso, reenviaria tudo a cada abertura.
+  const VISTOS = 'om30:senhas-d1:v1:vistos';
+  const vistos = new Map((() => { try { const o = JSON.parse(localStorage.getItem(VISTOS) || '{}'); return Object.entries(o).filter(([, t]) => Date.now() - t < 86400000); } catch { return []; } })());
+  function gravarVistos() {
+    try { localStorage.setItem(VISTOS, JSON.stringify(Object.fromEntries([...vistos.entries()].filter(([, t]) => Date.now() - t < 86400000).slice(-2000)))); } catch {}
+  }
+  const RECENTE_MS = 15 * 60000;   // chamada só observada (não feita aqui): envia só se aconteceu há pouco
+
+  const unidade = () => norm(document.querySelector('a[href*="trocar_unidade_saude"]')?.textContent);
+  const profissional = () => { try { return limpo(window.OM30Ausencias?.profissionalLogado?.()); } catch { return ''; } };
+  function grupo(s) {
+    const t = norm(s?.tipo_atendimento?.nome);
+    if (/PEDIAT/.test(t)) return 'PEDIATRA';
+    if (/DENTIST|ODONTO/.test(t)) return 'DENTISTA';
+    if (/CLINIC/.test(t)) return 'CLINICO';
+    const p = (norm(s?.senha).match(/^([A-Z]{2})\d/) || [])[1];
+    return { CN: 'CLINICO', PD: 'PEDIATRA', DT: 'DENTISTA' }[p] || 'OUTRO';
+  }
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
+  function lerFila() { try { const a = JSON.parse(localStorage.getItem(FILA) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+  function gravarFila(a) { try { localStorage.setItem(FILA, JSON.stringify(a.slice(-500))); } catch {} }
+
+  async function enviar(keepalive = false) {
+    if (!API || !KEY || (!keepalive && Date.now() < st.proximoEm)) return;
+    const executar = async () => {
+      for (let i = 0; i < 10; i++) {
+        const fila = lerFila();
+        if (!fila.length) return;
+        const parte = fila.slice(0, 20);   // limite do Worker (≤ 40 consultas por requisição)
+        let r;
+        try {
+          r = await fetch(API.replace(/\/$/, '') + '/v1/eventos', { method: 'POST', mode: 'cors', credentials: 'omit', keepalive,
+            headers: { 'Content-Type': 'application/json', 'X-OM30-Key': KEY }, body: JSON.stringify({ eventos: parte }) });
+        } catch { st.erros++; st.falhas++; st.proximoEm = Date.now() + Math.min(300000, 15000 * 2 ** Math.min(st.falhas, 4)); return; }
+        st.ultimo = { http: r.status, em: new Date().toISOString() };
+        if (r.ok || r.status === 422 || r.status === 400) {
+          gravarFila(lerFila().slice(parte.length));
+          if (r.ok) st.enviados += parte.length; else st.recusados += parte.length;
+          st.falhas = 0; st.proximoEm = 0;
+          continue;
+        }
+        st.erros++; st.falhas++;
+        st.proximoEm = Date.now() + (r.status === 401 || r.status === 403 ? 3600000 : Math.min(300000, 15000 * 2 ** Math.min(st.falhas, 4)));
+        return;
+      }
+    };
+    try {
+      if (navigator.locks?.request) await navigator.locks.request('om30-senhas-envio', { ifAvailable: true }, async l => { if (l) await executar(); });
+      else await executar();
+    } catch {}
+  }
+
+  // s = senha devolvida pelo Senha Simples; url = rota da requisição; setor = ACOLHIMENTO | MEDICO.
+  let agendado = 0;
+  function observar(s, url, setor) {
+    if (!API || !KEY || !s?.senha || !s.chamado_em || !/^(ACOLHIMENTO|MEDICO|RECEPCAO)$/.test(setor || '')) return;
+    url = String(url || '');
+    if (/desvincular|concluir|retornar/i.test(url)) return;
+    const chamou = /chamar|proximo|rechama/i.test(url);
+    const chave = `${norm(s.senha)}|${s.chamado_em}`;
+    const jaVista = vistos.has(chave);
+    if (jaVista && !chamou) return;          // consulta repetida da mesma chamada
+    // Chamada feita em outro computador e vista só na consulta: o computador que chamou já mandou;
+    // aqui só complementa se for recente (cobre quem está sem o script), nunca as antigas da lista.
+    if (!chamou && !(Date.now() - Date.parse(s.chamado_em) < RECENTE_MS)) { vistos.set(chave, Date.now()); return; }
+    vistos.set(chave, Date.now()); gravarVistos();
+    const un = unidade();
+    if (!un) return;
+    const fila = lerFila();
+    fila.push({ tipo: 'chamada', eventId: uuid(), setor,
+      chamadoEm: jaVista ? new Date().toISOString() : s.chamado_em, rechamadaSemHorario: jaVista,
+      por: limpo(s.usuario?.nome) || (chamou ? profissional() : '') || null, local: limpo(s.local_atendimento?.nome) || null,
+      senha: norm(s.senha), unidade: un, criadaEm: s.created_at || null, grupo: grupo(s),
+      tipoSenha: limpo(s.tipo_atendimento?.nome) || null, preferencial: !!s.tipo_atendimento?.preferencial });
+    gravarFila(fila);
+    st.enfileirados++;
+    clearTimeout(agendado); agendado = setTimeout(() => enviar(), 4000);   // junta eventos próximos numa requisição
+  }
+
+  window.OM30Senhas = { observar, enviar: () => enviar(),
+    diagnostico: () => ({ ativo: !!(API && KEY), unidade: unidade(), naFila: lerFila().length, ...st }) };
+  if (API && KEY) {
+    setInterval(() => { if (lerFila().length) enviar(); }, 30000);
+    window.addEventListener('online', () => enviar());
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && lerFila().length) enviar(true); });
+    setTimeout(() => enviar(), 5000);
+  }
+})();
+// ===== FIM OM30 SENHAS D1 =====
 
 // ===== OM30 PROFISSIONAL NA FILA (idêntico nos dois scripts) =====
 // Filas do acolhimento (/acolhimentos) e médica (/prontuarios): mostra quem está com cada paciente,
@@ -821,6 +929,7 @@
     if (!s?.saude_atendimento_id || !s?.saude_atendimento_type) return;
     const chave = `${s.saude_atendimento_type}#${s.saude_atendimento_id}`;
     revisoesChamada.set(chave, (revisoesChamada.get(chave) || 0) + 1);
+    try { window.OM30Senhas?.observar(s, url, SETOR); } catch {}   // histórico de chamadas (OM30 Senhas D1)
     if (/desvincular|concluir|retornar/i.test(url)) chamadas.delete(chave);
     else if (s.chamado_em || s.confirmado_em || /chamar|proximo/i.test(url))
       chamadas.set(chave, { estado: s.confirmado_em ? 'CONFIRMADO' : 'CHAMADO',
@@ -911,7 +1020,7 @@
     const linhas = mapaLinhas(tbody);
     for (const it of itensValidos(vm)) {
       const atual = presencas.get(it.atendimento_str);
-      const p = atual && (!atual.validoAte || atual.validoAte > Date.now()) ? atual : null;
+      const p = atual && atual.setor === SETOR && (!atual.validoAte || atual.validoAte > Date.now()) ? atual : null;
       const ultima = !p && chamadas.get(it.atendimento_str);
       const c = ultima && Date.now() - ultima.t < VALIDADE_CHAMADA_MS ? ultima : null;
       if (!p?.por && !c?.nome) continue;
@@ -963,6 +1072,7 @@
         if (m.consultaOk === false) {
           for (const [k, p] of presencas) if (ativos.has(k) && p.validoAte > Date.now() && !m.has(k) && !m.consultadosOk?.has(k)) m.set(k, p);
         }
+        for (const [k, p] of m) if (p.setor !== SETOR) m.delete(k);
         presencas = m;
         pintar(vm); // não espera consultas lentas de senha para mostrar a presença confirmada.
       }
@@ -1024,6 +1134,17 @@
 (() => {
   'use strict';
 
+  // v2.3.17 (candidata, não publicada):
+  // - Presença: o acolhimento só mostra "Em atendimento" de ficha aberta no setor ACOLHIMENTO.
+  //
+  // v2.3.16:
+  // - Fila principal do acolhimento: cards de filtro no padrão da fila médica —
+  //   Todos, Preferencial, Retorno e Dentista, cada um com quantidade e tempo médio de espera.
+  // - Clicar no card mostra só aquele grupo (as outras linhas ficam ocultas, nada sai da fila).
+  //   O filtro escolhido fica salvo no navegador.
+  // - Grupo pelo prefixo da senha: RT = Retorno (mesma regra da fila médica),
+  //   PF = Preferencial, DT = Dentista.
+  //
   // v2.3.9:
   // - Origem da ausência registrada no Cloudflare D1 no momento em que o Saúde Simples confirma
   //   "Paciente ausente" (PUT nativo, resposta 2xx; descartada se o próprio sistema desfizer).
@@ -4625,12 +4746,51 @@
     if (ths[5]) ths[5].textContent = 'Idade';
   }
 
+  // ---- Filtro da fila do acolhimento (Preferencial / Retorno / Dentista) ----
+  // Mesmo padrão da fila médica: card com quantidade + tempo médio; clicar filtra.
+  const STORAGE_FILTRO_FILA_ACOLH = `${PREFIX}:filtro-fila-acolhimento`;
+  const FILTROS_FILA_ACOLH = [
+    { key: 'TODOS',        label: 'Na fila',      cor: '#6c757d' },
+    { key: 'PREFERENCIAL', label: 'Preferencial', cor: '#fd7e14' },
+    { key: 'RETORNO',      label: 'Retorno',      cor: '#6f42c1' },
+    { key: 'DENTISTA',     label: 'Dentista',     cor: '#0aa2c0' }
+  ];
+  const FILTROS_FILA_ACOLH_VALIDOS = new Set(FILTROS_FILA_ACOLH.map(f => f.key));
+  let filtroFilaAcolh = localStorage.getItem(STORAGE_FILTRO_FILA_ACOLH) || 'TODOS';
+  if (!FILTROS_FILA_ACOLH_VALIDOS.has(filtroFilaAcolh)) filtroFilaAcolh = 'TODOS';
+
+  // Regra da operação: o grupo vem do prefixo da senha (RT retorno, PF preferencial, DT dentista).
+  const PREFIXO_SENHA_FILA_ACOLH = {
+    RETORNO: /^RT\d/,
+    PREFERENCIAL: /^PF\d/,
+    DENTISTA: /^DT\d/
+  };
+
+  function itemAcolhEh(item, grupo) {
+    const rx = PREFIXO_SENHA_FILA_ACOLH[grupo];
+    return rx ? rx.test(norm(item?.senha)) : true;
+  }
+
+  function mediaEsperaAcolh(itens, agora) {
+    if (!itens.length) return 0;
+    return itens.reduce((acc, x) => acc + tempoEsperaAcolhimentoMs(x, agora), 0) / itens.length;
+  }
+
+  function aplicarFiltroFilaAcolhimento(collection = acolhEstavelCollectionVm) {
+    if (!collection) return;
+    for (const tr of linhasFilaPrincipalAcolhimento(collection)) {
+      // Sem item Vue, a senha da própria linha ainda permite filtrar retorno/prefixos.
+      const item = itemFilaAcolhimentoDaLinha(tr) ||
+        { senha: clean(tr.cells?.[6]?.innerText || tr.cells?.[6]?.textContent) };
+      const mostrar = filtroFilaAcolh === 'TODOS' || itemAcolhEh(item, filtroFilaAcolh);
+      tr.classList.toggle('om30-acolh-fora-filtro', !mostrar);
+    }
+  }
+
   function atualizarResumoFilaAcolhimento(collection = acolhEstavelCollectionVm) {
     if (!collection) return;
     const itens = Array.isArray(collection?.$data?.items) ? collection.$data.items : [];
     const agora = Date.now();
-    const esperas = itens.map(x => tempoEsperaAcolhimentoMs(x, agora)).filter(x => x >= 0);
-    const media = esperas.length ? esperas.reduce((a,b) => a + b, 0) / esperas.length : 0;
 
     let bar = document.getElementById('om30-acolh-resumo');
     if (!bar) {
@@ -4640,15 +4800,37 @@
 
       bar = document.createElement('div');
       bar.id = 'om30-acolh-resumo';
-      bar.innerHTML =
-        '<div class="om30-acolh-card"><span>Na fila</span><strong class="om30-acolh-total">0</strong></div>' +
-        '<div class="om30-acolh-card"><span>Tempo médio</span><strong class="om30-acolh-media">0 min</strong></div>' +
+      bar.innerHTML = FILTROS_FILA_ACOLH.map(f =>
+        `<button type="button" class="om30-acolh-card om30-acolh-filtro" data-filtro="${f.key}" style="--c:${f.cor}">` +
+          `<span class="om30-acolh-rotulo"><i class="om30-acolh-dot"></i>${f.label}</span>` +
+          '<strong class="om30-acolh-qtd">0</strong>' +
+          '<em class="om30-acolh-media">Sem pacientes</em>' +
+        '</button>'
+      ).join('') +
         '<div class="om30-acolh-card om30-acolh-horario"><span>Horário</span><strong class="om30-acolh-agora">--:--</strong></div>';
+      bar.querySelectorAll('.om30-acolh-filtro').forEach(card => {
+        card.addEventListener('click', () => {
+          const key = card.dataset.filtro;
+          // Clicar de novo no filtro ativo volta para Todos.
+          filtroFilaAcolh = key === filtroFilaAcolh ? 'TODOS' : key;
+          try { localStorage.setItem(STORAGE_FILTRO_FILA_ACOLH, filtroFilaAcolh); } catch {}
+          aplicarFiltroFilaAcolhimento(acolhEstavelCollectionVm);
+          atualizarResumoFilaAcolhimento(acolhEstavelCollectionVm);
+        });
+      });
       host.insertBefore(bar, ref);
     }
 
-    bar.querySelector('.om30-acolh-total').textContent = String(itens.length);
-    bar.querySelector('.om30-acolh-media').textContent = formatarEsperaAcolhimento(media);
+    for (const f of FILTROS_FILA_ACOLH) {
+      const card = bar.querySelector(`.om30-acolh-filtro[data-filtro="${f.key}"]`);
+      if (!card) continue;
+      const grupo = f.key === 'TODOS' ? itens : itens.filter(item => itemAcolhEh(item, f.key));
+      card.classList.toggle('ativo', f.key === filtroFilaAcolh);
+      card.querySelector('.om30-acolh-qtd').textContent = String(grupo.length);
+      const media = card.querySelector('.om30-acolh-media');
+      if (grupo.length) media.innerHTML = `Tempo médio <b>${formatarEsperaAcolhimento(mediaEsperaAcolh(grupo, agora))}</b>`;
+      else media.textContent = 'Sem pacientes';
+    }
     bar.querySelector('.om30-acolh-agora').textContent = horarioCurtoAgora();
   }
 
@@ -4659,6 +4841,7 @@
       const item = itemFilaAcolhimentoDaLinha(tr);
       if (item) decorarLinhaFilaAcolhimento(tr, item);
     }
+    aplicarFiltroFilaAcolhimento(collection);
     atualizarResumoFilaAcolhimento(collection);
   }
 
@@ -4683,6 +4866,15 @@
       '#om30-acolh-resumo .om30-acolh-card{min-width:130px;padding:7px 11px;border:1px solid #d8dfe5;border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(15,23,42,.04);display:flex;align-items:center;justify-content:space-between;gap:12px;}',
       '#om30-acolh-resumo .om30-acolh-card span{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.35px;color:#7a8590;}',
       '#om30-acolh-resumo .om30-acolh-card strong{font-size:15px;font-weight:800;color:#35404a;font-variant-numeric:tabular-nums;}',
+      '#om30-acolh-resumo .om30-acolh-filtro{position:relative;display:grid;grid-template-columns:1fr auto;align-items:center;gap:2px 12px;min-width:150px;text-align:left;cursor:pointer;font-family:inherit;border-left:4px solid var(--c);}',
+      '#om30-acolh-resumo .om30-acolh-filtro:hover{background:#f7f9fb;}',
+      '#om30-acolh-resumo .om30-acolh-filtro.ativo{background:#f7f9fb;border-color:var(--c);box-shadow:0 0 0 2px color-mix(in srgb,var(--c) 22%,transparent);}',
+      '#om30-acolh-resumo .om30-acolh-rotulo{display:inline-flex;align-items:center;gap:6px;}',
+      '#om30-acolh-resumo .om30-acolh-dot{width:8px;height:8px;border-radius:50%;background:var(--c);display:inline-block;}',
+      '#om30-acolh-resumo .om30-acolh-filtro .om30-acolh-qtd{font-size:17px;}',
+      '#om30-acolh-resumo .om30-acolh-media{grid-column:1 / -1;font-style:normal;font-size:10px;color:#7a8590;white-space:nowrap;}',
+      '#om30-acolh-resumo .om30-acolh-media b{color:#35404a;font-weight:800;}',
+      '.collection-with-search-atendimento tr.om30-acolh-fora-filtro{display:none!important;}',
       '#om30-acolh-resumo .om30-acolh-horario{margin-left:auto;}',
       '#om30-acolh-resumo .om30-acolh-horario strong{font-size:18px;}',
       '.collection-with-search-atendimento .om30-acolh-th-espera{display:block;margin-top:2px;font-size:8px;font-weight:700;color:#8a949c;text-transform:none;white-space:nowrap;}',
@@ -4926,6 +5118,8 @@
           if (!acolhEstavelListVm?.$el?.isConnected || !acolhEstavelCollectionVm?.$el?.isConnected) {
             conectarFilaAcolhimentoEstavel();
           }
+          // Linhas recriadas pelo Vue (pesquisa nativa, troca de guichê) voltam sem a classe do filtro.
+          if (filtroFilaAcolh !== 'TODOS') aplicarFiltroFilaAcolhimento();
         }, 150);
       });
       acolhEstavelObserver.observe(document.body, { childList:true, subtree:true });

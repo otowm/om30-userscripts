@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Fila Médica | Risco + Retorno
 // @namespace    https://om30.com.br/
-// @version      2.14.15
+// @version      2.15.1
 // @description  Fila médica contínua no padrão Controle de Salas: coleção nativa completa, filtros estáveis, tempo de espera, ações e retorno médico RT de 36h + profissional do Retorno nativo.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Fila-Medica-Risco-Retorno.user.js
@@ -34,7 +34,7 @@
 // Nada é mostrado ao profissional. Suporte: OM30Ausencias.diagnostico() no console.
 (() => {
   'use strict';
-  const BUILD = 'OM30-D1-V5.3-2026-10-26';
+  const BUILD = 'OM30-D1-V5.4-2026-11-07';
   if (window.__OM30_AUSENCIAS_D1__) return;   // o outro script OM30 já instalou o mesmo coletor
   const API = 'https://om30-ausencias.cloud-om30-2.workers.dev';
   const KEY = String.fromCharCode(65,67,106,90,81,57,71,82,56,86,115,82,79,107,83,113,107,100,54,76,55,86,67,82,53,114,71,84,80,117,68,72,70,104,76,88,86,109,116,82,98,112,87,81,86,55,121,71);
@@ -472,7 +472,7 @@
       if (!forcar && Date.now() < recuos[classe].ate) return mapaDoRegistro(leituras.get(chave), classe, true);
       const inicio = Date.now(), epoca = epocas[classe];
       try {
-        const obj = await postar(classe === 'origem' ? '/v1/lookup' : '/v1/presenca/lote', { atendimentos: lista });
+        const obj = await postar(classe === 'origem' ? '/v1/lookup' : '/v1/presenca/lote', classe === 'origem' || !SETOR ? { atendimentos: lista } : { atendimentos: lista, setor: SETOR });
         if (epoca !== epocas[classe]) return mapaDoRegistro(null, classe, true);
         const entradas = [], solicitados = new Set(lista.map(chaveItem));
         const dados = classe === 'origem' ? obj.encontrados : obj.presentes;
@@ -482,7 +482,8 @@
           if (classe === 'origem') {
             if (p.origem === 'MEDICO' || p.origem === 'ACOLHIMENTO') entradas.push([p.atendimento,
               { origem: p.origem, por: limpo(p.por, 80), local: limpo(p.local, 60), em: p.registradoEm || null, eventId: p.eventId || null }]);
-          } else if (p.por) {
+          } else if (p.por && (!SETOR || p.setor === SETOR)) {
+            // Cada tela só mostra a presença do próprio setor: ficha do Acolhimento não vira "Em atendimento" na fila médica.
             // Expiração real da concessão, nunca inferida de "desde" (início do atendimento).
             const expira = instanteServidor(p.expiresAt), servidor = instanteServidor(obj.serverNow);
             const validoAte = expira ? (servidor ? inicio + Math.max(0, expira - servidor) : expira) : 0;
@@ -569,6 +570,113 @@
   console.info('[OM30 D1] Coletor V5.3 ativo', SETOR ? `(${SETOR})` : '');
 })();
 // ===== FIM OM30 AUSÊNCIAS D1 =====
+
+// ===== OM30 SENHAS D1 — envio das chamadas (idêntico nos scripts de fila) =====
+// Manda cada chamada de senha (Acolhimento / Fila médica) para o Worker om30-senhas, que guarda o
+// histórico por senha: quem chamou, guichê/sala, horário, rechamadas. Nada do paciente é enviado.
+// Fila no localStorage; o servidor ignora repetidos. Desligado enquanto API/KEY estiverem vazios.
+// Suporte: OM30Senhas.diagnostico() no console.
+(() => {
+  'use strict';
+  if (window.__OM30_SENHAS_ENVIO__) return;
+  window.__OM30_SENHAS_ENVIO__ = true;
+  const API = 'https://ps.worker-senhas.workers.dev';   // Worker om30-senhas (conta Senhas PS).<conta>.workers.dev
+  const KEY = String.fromCharCode(83,52,86,67,112,89,48,67,119,115,103,119,109,45,89,82,110,65,102,105,67,53,97,55,65,104,51,120,82,54,80,118,89,84,69,116,102,76,106,104,69,100,66,109,116,104,104,108);   // chave do cliente (secret CLIENT_KEY do Worker)
+  const FILA = 'om30:senhas-d1:v1:fila';
+  const limpo = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const norm = v => limpo(v).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+  const st = { enfileirados: 0, enviados: 0, recusados: 0, erros: 0, falhas: 0, proximoEm: 0, ultimo: null };
+  // "senha|chamado_em" já enviados por este navegador (24 h, sobrevive a recarregar a página):
+  // cada página da fila reconsulta as senhas chamadas e, sem isso, reenviaria tudo a cada abertura.
+  const VISTOS = 'om30:senhas-d1:v1:vistos';
+  const vistos = new Map((() => { try { const o = JSON.parse(localStorage.getItem(VISTOS) || '{}'); return Object.entries(o).filter(([, t]) => Date.now() - t < 86400000); } catch { return []; } })());
+  function gravarVistos() {
+    try { localStorage.setItem(VISTOS, JSON.stringify(Object.fromEntries([...vistos.entries()].filter(([, t]) => Date.now() - t < 86400000).slice(-2000)))); } catch {}
+  }
+  const RECENTE_MS = 15 * 60000;   // chamada só observada (não feita aqui): envia só se aconteceu há pouco
+
+  const unidade = () => norm(document.querySelector('a[href*="trocar_unidade_saude"]')?.textContent);
+  const profissional = () => { try { return limpo(window.OM30Ausencias?.profissionalLogado?.()); } catch { return ''; } };
+  function grupo(s) {
+    const t = norm(s?.tipo_atendimento?.nome);
+    if (/PEDIAT/.test(t)) return 'PEDIATRA';
+    if (/DENTIST|ODONTO/.test(t)) return 'DENTISTA';
+    if (/CLINIC/.test(t)) return 'CLINICO';
+    const p = (norm(s?.senha).match(/^([A-Z]{2})\d/) || [])[1];
+    return { CN: 'CLINICO', PD: 'PEDIATRA', DT: 'DENTISTA' }[p] || 'OUTRO';
+  }
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
+  function lerFila() { try { const a = JSON.parse(localStorage.getItem(FILA) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+  function gravarFila(a) { try { localStorage.setItem(FILA, JSON.stringify(a.slice(-500))); } catch {} }
+
+  async function enviar(keepalive = false) {
+    if (!API || !KEY || (!keepalive && Date.now() < st.proximoEm)) return;
+    const executar = async () => {
+      for (let i = 0; i < 10; i++) {
+        const fila = lerFila();
+        if (!fila.length) return;
+        const parte = fila.slice(0, 20);   // limite do Worker (≤ 40 consultas por requisição)
+        let r;
+        try {
+          r = await fetch(API.replace(/\/$/, '') + '/v1/eventos', { method: 'POST', mode: 'cors', credentials: 'omit', keepalive,
+            headers: { 'Content-Type': 'application/json', 'X-OM30-Key': KEY }, body: JSON.stringify({ eventos: parte }) });
+        } catch { st.erros++; st.falhas++; st.proximoEm = Date.now() + Math.min(300000, 15000 * 2 ** Math.min(st.falhas, 4)); return; }
+        st.ultimo = { http: r.status, em: new Date().toISOString() };
+        if (r.ok || r.status === 422 || r.status === 400) {
+          gravarFila(lerFila().slice(parte.length));
+          if (r.ok) st.enviados += parte.length; else st.recusados += parte.length;
+          st.falhas = 0; st.proximoEm = 0;
+          continue;
+        }
+        st.erros++; st.falhas++;
+        st.proximoEm = Date.now() + (r.status === 401 || r.status === 403 ? 3600000 : Math.min(300000, 15000 * 2 ** Math.min(st.falhas, 4)));
+        return;
+      }
+    };
+    try {
+      if (navigator.locks?.request) await navigator.locks.request('om30-senhas-envio', { ifAvailable: true }, async l => { if (l) await executar(); });
+      else await executar();
+    } catch {}
+  }
+
+  // s = senha devolvida pelo Senha Simples; url = rota da requisição; setor = ACOLHIMENTO | MEDICO.
+  let agendado = 0;
+  function observar(s, url, setor) {
+    if (!API || !KEY || !s?.senha || !s.chamado_em || !/^(ACOLHIMENTO|MEDICO|RECEPCAO)$/.test(setor || '')) return;
+    url = String(url || '');
+    if (/desvincular|concluir|retornar/i.test(url)) return;
+    const chamou = /chamar|proximo|rechama/i.test(url);
+    const chave = `${norm(s.senha)}|${s.chamado_em}`;
+    const jaVista = vistos.has(chave);
+    if (jaVista && !chamou) return;          // consulta repetida da mesma chamada
+    // Chamada feita em outro computador e vista só na consulta: o computador que chamou já mandou;
+    // aqui só complementa se for recente (cobre quem está sem o script), nunca as antigas da lista.
+    if (!chamou && !(Date.now() - Date.parse(s.chamado_em) < RECENTE_MS)) { vistos.set(chave, Date.now()); return; }
+    vistos.set(chave, Date.now()); gravarVistos();
+    const un = unidade();
+    if (!un) return;
+    const fila = lerFila();
+    fila.push({ tipo: 'chamada', eventId: uuid(), setor,
+      chamadoEm: jaVista ? new Date().toISOString() : s.chamado_em, rechamadaSemHorario: jaVista,
+      por: limpo(s.usuario?.nome) || (chamou ? profissional() : '') || null, local: limpo(s.local_atendimento?.nome) || null,
+      senha: norm(s.senha), unidade: un, criadaEm: s.created_at || null, grupo: grupo(s),
+      tipoSenha: limpo(s.tipo_atendimento?.nome) || null, preferencial: !!s.tipo_atendimento?.preferencial });
+    gravarFila(fila);
+    st.enfileirados++;
+    clearTimeout(agendado); agendado = setTimeout(() => enviar(), 4000);   // junta eventos próximos numa requisição
+  }
+
+  window.OM30Senhas = { observar, enviar: () => enviar(),
+    diagnostico: () => ({ ativo: !!(API && KEY), unidade: unidade(), naFila: lerFila().length, ...st }) };
+  if (API && KEY) {
+    setInterval(() => { if (lerFila().length) enviar(); }, 30000);
+    window.addEventListener('online', () => enviar());
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && lerFila().length) enviar(true); });
+    setTimeout(() => enviar(), 5000);
+  }
+})();
+// ===== FIM OM30 SENHAS D1 =====
 
 // ===== OM30 PROFISSIONAL NA FILA (idêntico nos dois scripts) =====
 // Filas do acolhimento (/acolhimentos) e médica (/prontuarios): mostra quem está com cada paciente,
@@ -826,6 +934,7 @@
     if (!s?.saude_atendimento_id || !s?.saude_atendimento_type) return;
     const chave = `${s.saude_atendimento_type}#${s.saude_atendimento_id}`;
     revisoesChamada.set(chave, (revisoesChamada.get(chave) || 0) + 1);
+    try { window.OM30Senhas?.observar(s, url, SETOR); } catch {}   // histórico de chamadas (OM30 Senhas D1)
     if (/desvincular|concluir|retornar/i.test(url)) chamadas.delete(chave);
     else if (s.chamado_em || s.confirmado_em || /chamar|proximo/i.test(url))
       chamadas.set(chave, { estado: s.confirmado_em ? 'CONFIRMADO' : 'CHAMADO',
@@ -916,7 +1025,7 @@
     const linhas = mapaLinhas(tbody);
     for (const it of itensValidos(vm)) {
       const atual = presencas.get(it.atendimento_str);
-      const p = atual && (!atual.validoAte || atual.validoAte > Date.now()) ? atual : null;
+      const p = atual && atual.setor === SETOR && (!atual.validoAte || atual.validoAte > Date.now()) ? atual : null;
       const ultima = !p && chamadas.get(it.atendimento_str);
       const c = ultima && Date.now() - ultima.t < VALIDADE_CHAMADA_MS ? ultima : null;
       if (!p?.por && !c?.nome) continue;
@@ -968,6 +1077,7 @@
         if (m.consultaOk === false) {
           for (const [k, p] of presencas) if (ativos.has(k) && p.validoAte > Date.now() && !m.has(k) && !m.consultadosOk?.has(k)) m.set(k, p);
         }
+        for (const [k, p] of m) if (p.setor !== SETOR) m.delete(k);
         presencas = m;
         pintar(vm); // não espera consultas lentas de senha para mostrar a presença confirmada.
       }
@@ -999,7 +1109,7 @@
   }
 
   const css = document.createElement('style');
-  css.textContent = "\n.om30-prof-fila{display:flex;box-sizing:border-box;width:fit-content;max-width:100%;margin-top:6px;padding:7px 10px;border:1px solid #b7c2cc;border-left:3px solid #718494;border-radius:7px;background:#eef2f5;color:#2f3740;text-align:left;white-space:normal;font-family:inherit;font-size:12px;line-height:1.35;letter-spacing:normal;text-transform:none}\n.om30-prof-fila .om30-prof-corpo{display:flex;flex-direction:column;min-width:0;gap:3px}\n.om30-prof-fila .om30-prof-estado{display:inline-flex;align-items:center;gap:6px;max-width:100%;font-size:12px;line-height:1.35;font-weight:700;color:#394f60}\n.om30-prof-fila .om30-prof-ponto{display:inline-block;box-sizing:border-box;flex:0 0 6px;width:6px;height:6px;border:1px solid currentColor;border-radius:50%}\n.om30-prof-fila .om30-prof-detalhes{display:flex;flex-wrap:wrap;align-items:baseline;min-width:0;column-gap:7px;row-gap:0}\n.om30-prof-fila .om30-prof-nome{display:block;min-width:0;max-width:100%;font-size:13px;line-height:1.4;font-weight:600;color:#26333e;overflow-wrap:anywhere}\n.om30-prof-fila .om30-prof-local{display:block;min-width:0;max-width:100%;font-size:11.5px;line-height:1.4;font-weight:400;color:#526371;overflow-wrap:anywhere}\n.om30-prof-fila .om30-prof-local::before{content:'·';padding-right:7px;color:#74838e}\n.om30-prof-fila.om30-prof-atendendo{border-color:#a8c6b8;border-left-color:#3d7f62;background:#eaf4ee}\n.om30-prof-fila.om30-prof-atendendo .om30-prof-estado{color:#285c41}\n.om30-prof-fila.om30-prof-atendendo .om30-prof-ponto{background:currentColor}\n@media(forced-colors:active){.om30-prof-fila{border:1px solid CanvasText;border-left-width:2px;background:Canvas;color:CanvasText}.om30-prof-fila .om30-prof-nome,.om30-prof-fila .om30-prof-estado,.om30-prof-fila .om30-prof-local,.om30-prof-fila .om30-prof-local::before{color:CanvasText}}\n";
+  css.textContent = "\n.om30-prof-fila{display:flex;box-sizing:border-box;width:fit-content;max-width:100%;margin-top:6px;padding:7px 10px;border:1px solid #b7c2cc;border-left:3px solid #718494;border-radius:7px;background:#eef2f5;color:#2f3740;text-align:left;white-space:normal;font-family:inherit;font-size:12px;line-height:1.35;letter-spacing:normal;text-transform:none}\n.om30-prof-fila .om30-prof-corpo{display:flex;flex-direction:column;min-width:0;gap:3px}\n.om30-prof-fila .om30-prof-estado{display:inline-flex;align-items:center;gap:6px;max-width:100%;font-size:12px;line-height:1.35;font-weight:700;color:#394f60}\n.om30-prof-fila .om30-prof-ponto{display:inline-block;box-sizing:border-box;flex:0 0 6px;width:6px;height:6px;border:1px solid currentColor;border-radius:50%}\n.om30-prof-fila .om30-prof-detalhes{display:flex;flex-wrap:nowrap;align-items:baseline;min-width:0;max-width:100%;column-gap:5px;row-gap:0}\n.om30-prof-fila .om30-prof-nome{display:block;flex:0 1 auto;min-width:0;max-width:100%;font-size:13px;line-height:1.4;font-weight:600;color:#26333e;overflow-wrap:anywhere}\n.om30-prof-fila .om30-prof-local{display:block;flex:0 0 auto;min-width:0;font-size:11px;line-height:1.4;font-weight:400;color:#526371;white-space:nowrap}\n.om30-prof-fila .om30-prof-local::before{content:'·';padding-right:7px;color:#74838e}\n.om30-prof-fila.om30-prof-atendendo{border-color:#a8c6b8;border-left-color:#3d7f62;background:#eaf4ee}\n.om30-prof-fila.om30-prof-atendendo .om30-prof-estado{color:#285c41}\n.om30-prof-fila.om30-prof-atendendo .om30-prof-ponto{background:currentColor}\n@media(forced-colors:active){.om30-prof-fila{border:1px solid CanvasText;border-left-width:2px;background:Canvas;color:CanvasText}.om30-prof-fila .om30-prof-nome,.om30-prof-fila .om30-prof-estado,.om30-prof-fila .om30-prof-local,.om30-prof-fila .om30-prof-local::before{color:CanvasText}}\n";
   (document.head || document.documentElement).appendChild(css);
   setInterval(ciclo, CICLO_MS);
   setTimeout(ciclo, 3000);
@@ -1031,6 +1141,15 @@
 
   // v2.10.5:
   // - /prontuarios e /prontuarios/urgencia_emergencia são tratados como fila médica.
+  // v2.14.22 (candidata, não publicada):
+  // - Retorno RT: além das linhas que já vêm no prontuário, lê o histórico oficial completo do munícipe
+  //   (DataTable /prontuarios/historicos_atendimentos.json, paginado; munícipe por ID, CPF/CNS ou nome + nascimento).
+  // - Cada candidato continua conferido abrindo o prontuário: horário REAL antes da chegada do RT, dentro de 36h,
+  //   mesma unidade e especialidade médica. Fica o mais recente. Sem histórico completo: "incompleto", nunca "não localizado".
+  // - Presença: a fila médica só mostra "Em atendimento" de ficha aberta no setor MEDICO
+  //   (ficha do Acolhimento não aparece mais como atendimento médico).
+  // - Cartão "Em atendimento/Chamado por" compacto, consultório ao lado do nome (igual ao Acolhimento).
+  //
   // v2.14.10:
   // - Origem da ausência registrada no Cloudflare D1 no momento em que o Saúde Simples confirma
   //   "Paciente ausente" (PUT nativo, resposta 2xx; descartada se o próprio sistema desfizer).
@@ -2339,22 +2458,145 @@
   return entry.promise;
 }
 
-  async function om30RtDocumento(url) {
-  // Um único limite de rede para todos os RT da página, incluindo detalhes/unidade.
+  function om30RtDrenarRede() {
+  while(om30RtRedeAtiva<3&&om30RtFilaRede.length){om30RtRedeAtiva++;om30RtFilaRede.shift()();}
+}
+
+  async function om30RtResposta(url,init={}) {
+  // Limite comum às consultas do script; nenhuma consulta é enviada ao Cloudflare.
   await new Promise(resolve=>{om30RtFilaRede.push(resolve);om30RtDrenarRede();});
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);
   try{
-    const response=await fetch(url,{credentials:'same-origin',redirect:'follow',cache:'no-store',signal:controller.signal});
+    const response=await fetch(url,{...init,credentials:'same-origin',redirect:'follow',cache:'no-store',signal:controller.signal});
     if(!response.ok)throw new Error('HTTP '+response.status);
-    const text=await response.text();
-    const doc=new DOMParser().parseFromString(text,'text/html');
-    if(doc.querySelector('input[type="password"]'))throw new Error('Sessão do sistema indisponível');
-    return doc;
+    return response;
   }finally{clearTimeout(timer);om30RtRedeAtiva--;om30RtDrenarRede();}
 }
 
-  function om30RtDrenarRede() {
-  while(om30RtRedeAtiva<3&&om30RtFilaRede.length){om30RtRedeAtiva++;om30RtFilaRede.shift()();}
+  async function om30RtDocumento(url) {
+  const response=await om30RtResposta(url,{method:'GET',credentials:'same-origin',redirect:'follow',cache:'no-store'});
+  const text=await response.text();
+  const doc=new DOMParser().parseFromString(text,'text/html');
+  if(doc.querySelector('input[type="password"]'))throw new Error('Sessão do sistema indisponível');
+  return doc;
+}
+
+  function om30RtNormalizarNascimento(value) {
+  const raw=om30RtTextoPlano(value),digits=raw.replace(/\D/g,'');
+  let d,m,y;
+  if((m=raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/))){d=+m[1];m=+m[2];y=+m[3];}
+  else if((m=raw.match(/^(\d{4})-(\d{2})-(\d{2})$/))){y=+m[1];d=+m[3];m=+m[2];}
+  else if(/^\d{8}$/.test(digits)){d=+digits.slice(0,2);m=+digits.slice(2,4);y=+digits.slice(4);}
+  else return '';
+  const dt=new Date(y,m-1,d);
+  return dt.getFullYear()===y&&dt.getMonth()===m-1&&dt.getDate()===d?`${String(d).padStart(2,'0')}/${String(m).padStart(2,'0')}/${y}`:'';
+}
+
+  function om30RtTextoPlano(value) {
+  const raw=String(value??'');
+  if(!/[<&]/.test(raw))return clean(raw);
+  const box=document.createElement('div');box.innerHTML=raw;
+  return clean(box.innerText||box.textContent||'');
+}
+
+  function om30RtValor(obj,aliases) {
+  if(!obj||typeof obj!=='object')return '';
+  const wanted=new Set(aliases.map(value=>norm(value).replace(/[^A-Z0-9]/g,'')));
+  for(const [key,value] of Object.entries(obj))if(wanted.has(norm(key).replace(/[^A-Z0-9]/g,''))&&value!=null&&typeof value!=='object')return om30RtTextoPlano(value);
+  return '';
+}
+
+  function om30RtIdentidadeFila(item,row,doc) {
+  const ownId=clean(item?.municipe_id||item?.id_municipe||item?.paciente_id||item?.id_paciente||item?.municipe?.id||item?.paciente?.id);
+  const formId=clean(doc.querySelector('#prontuario_municipe_id, input[name="prontuario[municipe_id]"], input[name="prontuario[municipe_attributes][id]"]')?.value);
+  const id=ownId||formId;
+  const cns=String(item?.codigo_cns||item?.cns||row?.cells?.[1]?.innerText||row?.cells?.[1]?.textContent||'').replace(/\D/g,'');
+  const cpf=String(item?.cpf||item?.cpf_municipe||item?.municipe?.cpf||'').replace(/\D/g,'');
+  const name=clean(item?.nome_municipe||item?.municipe?.nome||row?.cells?.[2]?.querySelector?.('span:not(.badge)')?.innerText||row?.cells?.[2]?.querySelector?.('span:not(.badge)')?.textContent||row?.cells?.[2]?.innerText||row?.cells?.[2]?.textContent||'');
+  let birth='';
+  for(const [key,value] of Object.entries(item||{}))if(/nasc|birth/i.test(key)&&value){birth=om30RtNormalizarNascimento(value);if(birth)break;}
+  if(!birth){
+    const cells=[...(row?.cells||[])],headers=[...(row?.closest?.('table')?.querySelectorAll?.('thead th')||[])];
+    const index=headers.findIndex(th=>/NASCIMENTO/.test(norm(th.textContent)));
+    birth=om30RtNormalizarNascimento(cells[index>=0?index:4]?.innerText||cells[index>=0?index:4]?.textContent);
+  }
+  return {id:/^\d+$/.test(id)?id:'',cns:cns.length>=8?cns:'',cpf:cpf.length===11?cpf:'',name,birth};
+}
+
+  function om30RtIdCandidato(candidate) {
+  const c=candidate?._source||candidate?.source||candidate?.data||candidate;
+  const nested=c?.municipe||c?.paciente||{};
+  const id=c?.id??c?.municipe_id??c?.id_municipe??c?.value??nested?.id??candidate?._id;
+  return /^\d+$/.test(String(id??''))?String(id):'';
+}
+
+  function om30RtCandidatoIdentidade(candidate,identity) {
+  const source=candidate?._source||candidate?.source||candidate?.data||candidate;
+  const c={...(source||{}),...(source?.municipe&&typeof source.municipe==='object'?source.municipe:{}),...(source?.paciente&&typeof source.paciente==='object'?source.paciente:{})};
+  if(!c||typeof c!=='object')return false;
+  const name=norm(om30RtValor(c,['nome','nome completo','nome municipe','nome do municipe','nome cidadao','municipe','text','label']));
+  const birth=om30RtNormalizarNascimento(om30RtValor(c,['data nascimento','data de nascimento','data nascimento formatada','nascimento','birth date','birthdate']));
+  const cns=om30RtValor(c,['cns','codigo cns','cartao nacional de saude']).replace(/\D/g,'');
+  const cpf=om30RtValor(c,['cpf','cpf municipe']).replace(/\D/g,'');
+  if(identity.name&&name&&name!==norm(identity.name))return false;
+  if(identity.birth&&birth&&birth!==identity.birth)return false;
+  if(identity.cns&&cns&&identity.cns!==cns)return false;
+  if(identity.cpf&&cpf&&identity.cpf!==cpf)return false;
+  const exactDoc=(identity.cns&&cns===identity.cns)||(identity.cpf&&cpf===identity.cpf);
+  const exactNameBirth=identity.name&&identity.birth&&name===norm(identity.name)&&birth===identity.birth;
+  return !!(om30RtIdCandidato(candidate)&&(exactDoc||exactNameBirth));
+}
+
+  async function om30RtBuscarIdMunicipe(identity) {
+  if(identity.id)return identity.id;
+  if(!identity.cns&&!identity.cpf&&(!identity.name||!identity.birth))return '';
+  const queries=[identity.cns,identity.cpf,identity.name].filter(Boolean),found=new Map();
+  for(const query of [...new Set(queries)]){
+    const response=await om30RtResposta('/municipes/search_padronizado_com_mudanca.json?q='+encodeURIComponent(query),{headers:{Accept:'application/json'}});
+    const text=await response.text();let payload;
+    try{payload=JSON.parse(text);}catch{throw new Error('Resposta de identificação inválida');}
+    const list=Array.isArray(payload)?payload:Array.isArray(payload?.results)?payload.results:Array.isArray(payload?.data)?payload.data:Array.isArray(payload?.hits?.hits)?payload.hits.hits:[];
+    for(const candidate of list)if(om30RtCandidatoIdentidade(candidate,identity)){const id=om30RtIdCandidato(candidate);found.set(id,candidate);}
+    if(found.size>1)return '';
+    if(found.size===1)return [...found.keys()][0];
+  }
+  return '';
+}
+
+  function om30RtFormularioParams(form) {
+  const params=new URLSearchParams();
+  for(const el of form.querySelectorAll('input[name],select[name],textarea[name]')){
+    if(el.disabled)continue;
+    if((el.type==='checkbox'||el.type==='radio')&&!el.checked)continue;
+    if(el.tagName==='SELECT'&&el.multiple){for(const option of el.selectedOptions)params.append(el.name,option.value);continue;}
+    if(el.tagName==='SELECT')params.append(el.name,el.selectedOptions?.[0]?.value||'');
+    else if(el.type!=='file'&&el.type!=='submit'&&el.type!=='button')params.append(el.name,el.value||'');
+  }
+  return params;
+}
+
+  function om30RtNormalizarData(value) {
+  const raw=om30RtTextoPlano(value),m=raw.match(/(\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}|\d{4}-\d{2}-\d{2})/);
+  if(!m)return '';
+  const normalized=om30RtNormalizarNascimento(m[1]);
+  if(normalized)return normalized;
+  const iso=m[1].match(/^(\d{4})-(\d{2})-(\d{2})$/);return iso?`${iso[3]}/${iso[2]}/${iso[1]}`:'';
+}
+
+  function om30RtNormalizarHora(value) {
+  const m=om30RtTextoPlano(value).match(/(?:^|\D)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if(!m)return '';
+  const h=+m[1],min=+m[2],s=+(m[3]||0);
+  return h<=23&&min<=59&&s<=59?`${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}${m[3]?':'+String(s).padStart(2,'0'):''}`:'';
+}
+
+  function om30RtUnidadeCompativel(current,record) {
+  const ids=(current?.ids||[]).map(String).filter(Boolean),names=(current?.nomes||[]).map(normalizarNomeUnidade).filter(Boolean);
+  if(ids.length>1||names.length>1)return false;
+  const recordId=clean(record?.unidadeId),recordName=normalizarNomeUnidade(record?.unidadeTexto);
+  if(ids.length&&recordId)return ids[0]===recordId;
+  if(names.length&&recordName)return names[0]===recordName;
+  return false;
 }
 
   function om30RtChaveRegistro(r) {
@@ -2381,7 +2623,90 @@
   return atendimento.tipo==='AtendimentoAmbulatorial'&&r.atendimentoId===atendimento.id;
 }
 
-  async function om30RtResolver(atendimentoStr,refMs) {
+  async function om30RtHistoricoMunicipe(municipeId,refMs) {
+  // Mesmo JSON da Consulta de Prontuários (o Rastreamento de Senhas usa igual); filtro vai na URL.
+  // Colunas: Seleção | Data | Hora | Munícipe | Tipo | Profissional | Especialidade | Unidade | Ação
+  const dataBr=ms=>{const d=new Date(ms);return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;};
+  const erros={municipe_id:[],unidade_saude_id:[],profissional_id:[],data_inicio:[],data_fim:[],data_padronizada:[],tipo:[]};
+  const filtro={municipe_id:String(municipeId),unidade_saude_id:'',profissional_id:'',data_inicio:dataBr(refMs-JANELA_RETORNO_MS),data_fim:dataBr(refMs),
+    data_padronizada:'',tipo:['','atendimento_pa'],validation_context:null,errors:erros};
+  const registros=[];let total=null,offset=0;
+  for(let page=0;page<10;page++){
+    const q=new URLSearchParams({filtro:JSON.stringify(filtro),sEcho:String(page+1),iColumns:'9',sColumns:'',iDisplayStart:String(offset),iDisplayLength:'100',
+      sSearch:'',bRegex:'false',iSortingCols:'1',iSortCol_0:'1',sSortDir_0:'desc'});
+    for(let i=0;i<9;i++){q.set('mDataProp_'+i,String(i));q.set('sSearch_'+i,'');q.set('bRegex_'+i,'false');q.set('bSearchable_'+i,'true');q.set('bSortable_'+i,'true');}
+    const r=await om30RtResposta('/prontuarios/historicos_atendimentos.json?'+q,{headers:{Accept:'application/json','X-Requested-With':'XMLHttpRequest'}});
+    const txt=await r.text();let j;
+    try{j=JSON.parse(txt);}catch{return {status:'incompleto',motivo:/type=["']?password|usuarios\/login/i.test(txt)?'sessao':'json_historico',registros};}
+    const rows=Array.isArray(j?.aaData)?j.aaData:null;
+    if(!rows)return {status:'incompleto',motivo:'json_historico',registros};
+    if(total===null){const n=Number(j?.iTotalDisplayRecords??j?.iTotalRecords);total=Number.isFinite(n)&&n>=0?n:null;}
+    for(const row of rows){
+      if(!Array.isArray(row)||row.length<9)return {status:'incompleto',motivo:'colunas_historico',registros};
+      const acao=String(row[8]??'')+' '+String(row[0]??'');
+      const data=om30RtNormalizarData(row[1]),hora=om30RtNormalizarHora(row[2]);
+      registros.push({data,hora,timestamp:dataHoraParaMs(data,hora),tipo:om30RtTextoPlano(row[4]),profissional:om30RtNomeProfissional(om30RtTextoPlano(row[5])),
+        especialidade:om30RtTextoPlano(row[6]),unidadeTexto:om30RtTextoPlano(row[7]),atendimentoPaId:(acao.match(/atendimentos_pas\/(\d+)/)||[])[1]||'',
+        prontuarioId:(acao.match(/\/prontuarios\/(\d+)/)||[])[1]||'',href:(acao.match(/href=["']([^"']+)["']/)||[])[1]||''});
+    }
+    offset+=rows.length;
+    if(!rows.length||rows.length<100||(total!==null&&offset>=total))
+      return total!==null&&offset<total?{status:'incompleto',motivo:'total_inconsistente',registros}:{status:'completo',registros};
+  }
+  return {status:'incompleto',motivo:'limite_paginas',registros};
+}
+
+  function om30RtMesmaUnidadeNome(nomes,texto) {
+  // O histórico traz o nome completo ("... GUARUJA"); outras telas podem cortar o fim.
+  const y=normalizarNomeUnidade(texto);
+  if(!y)return false;
+  return nomes.some(n=>{const x=normalizarNomeUnidade(n);return x&&(x===y||(Math.min(x.length,y.length)>=15&&(x.startsWith(y)||y.startsWith(x))));});
+}
+
+  async function om30RtResolver(atendimentoStr,refMs,item=null,row=null) {
+  // 1) Histórico oficial do munícipe (data, hora, profissional, especialidade e unidade numa só consulta).
+  // 2) Se não der para ler o histórico inteiro: fluxo da 2.14.15 (tabela do prontuário + abrir cada prontuário).
+  const atendimento=parseAtendimento(atendimentoStr);
+  if(!atendimento||!(refMs>0))return {status:'incompleto',motivo:'referencia',registro:null};
+  let direto=null;
+  try{direto=await om30RtResolverHistorico(atendimento,refMs,item,row);}catch{direto=null;}
+  if(direto&&direto.status!=='incompleto')return direto;
+  const pagina=await om30RtResolverPagina(atendimentoStr,refMs);
+  if(pagina.status==='incompleto'&&direto)pagina.motivo=pagina.motivo||direto.motivo;
+  return pagina;
+}
+
+  async function om30RtResolverHistorico(atendimento,refMs,item,row) {
+  const empty=motivo=>({status:'incompleto',motivo,registro:null});
+  const doc=await om30RtDocumento('/prontuarios/new?prontuariavel_id='+encodeURIComponent(atendimento.id)+'&prontuariavel_type='+encodeURIComponent(atendimento.tipo));
+  const returnedId=clean(doc.querySelector('#prontuario_prontuariavel_id, input[name="prontuario[prontuariavel_id]"]')?.value);
+  if(returnedId&&returnedId!==atendimento.id)return empty('contexto');
+  const unidadeAtual=extrairUnidadesDocumento(doc);
+  const nomesUnidade=[...new Set([...(unidadeAtual.nomes||[]),clean(document.querySelector('a[href*="trocar_unidade_saude"]')?.textContent)].filter(Boolean))];
+  if(!nomesUnidade.length)return empty('unidade');
+  const municipeId=await om30RtBuscarIdMunicipe(om30RtIdentidadeFila(item,row,doc));
+  if(!municipeId)return empty('identidade');
+  const hist=await om30RtHistoricoMunicipe(municipeId,refMs);
+  if(hist.status!=='completo')return empty(hist.motivo||'historico');
+  const validos=[];let duvida=0;
+  for(const r of hist.registros){
+    if(atendimento.tipo==='AtendimentoPa'&&r.atendimentoPaId===atendimento.id)continue;   // o próprio RT
+    if(!r.timestamp){duvida=Math.max(duvida,refMs);continue;}
+    // Regra validada: só conta atendimento ANTES da chegada do RT e dentro de 36h.
+    if(r.timestamp>=refMs||!dentroDaJanelaRetorno(r.timestamp,refMs))continue;
+    if(!r.especialidade||!r.unidadeTexto||!r.profissional){duvida=Math.max(duvida,r.timestamp);continue;}
+    if(!ehEspecialidadeMedica(r.especialidade)||!om30RtMesmaUnidadeNome(nomesUnidade,r.unidadeTexto))continue;
+    validos.push({...r,dataAgendada:r.data,horaAgendada:r.hora,timestampAgendado:r.timestamp,
+      unidade:{ids:[],nomes:[r.unidadeTexto]},unidadeAtual,_fonteProntuario:'historico_municipe'});
+  }
+  validos.sort((a,b)=>b.timestamp-a.timestamp);
+  const registro=validos[0]||null;
+  // Linha sem dados suficientes que pode ser mais recente que a escolhida: não afirma nada.
+  if(duvida&&(!registro||duvida>registro.timestamp))return empty('linha_historico');
+  return {status:registro?'encontrado':'nao_localizado',motivo:'',registro,total:hist.registros.length,verificados:hist.registros.length,fonte:'historico_municipe'};
+}
+
+  async function om30RtResolverPagina(atendimentoStr,refMs) {
   const atendimento=parseAtendimento(atendimentoStr);
   const empty=(status,motivo)=>({status,motivo,registro:null});
   if(!atendimento||!(refMs>0))return empty('incompleto','referencia');
@@ -2440,10 +2765,9 @@
   const complete=progress.checked.size===candidates.length&&!paginado;
   return {status:complete?(registro?'encontrado':'nao_localizado'):'incompleto',motivo:!complete?'historico_parcial':'',registro,total:candidates.length,verificados:progress.checked.size};
 }
-
-  function buscarResultadoHistoricoAnterior(atendimentoStr,referenciaMs) {
+  function buscarResultadoHistoricoAnterior(atendimentoStr,referenciaMs,item=null,row=null) {
   const refMs=Number(referenciaMs)||0,key=atendimentoStr+'|'+refMs;
-  return om30RtCache(cacheHistoricoAnterior,key,()=>om30RtResolver(atendimentoStr,refMs),result=>result?.status==='encontrado',300000,30000);
+  return om30RtCache(cacheHistoricoAnterior,key,()=>om30RtResolver(atendimentoStr,refMs,item,row),result=>result?.status==='encontrado',300000,30000);
 }
 
   function om30RtSnapshot(anterior) {
@@ -2812,7 +3136,7 @@
   if(!info){state.pending=false;return;}
   info.style.color='#58616b';info.textContent='Retorno: consultando atendimentos desta unidade…';
   let result;
-  try{result=await buscarResultadoHistoricoAnterior(item.atendimento_str,ref);}catch{result={status:'incompleto',motivo:'consulta',registro:null};}
+  try{result=await buscarResultadoHistoricoAnterior(item.atendimento_str,ref,item,row);}catch{result={status:'incompleto',motivo:'consulta',registro:null};}
   state.pending=false;
   const current=itemDaLinha(row,vm);
   // Nunca pintar resultado atrasado em uma linha que o Vue já reutilizou.
