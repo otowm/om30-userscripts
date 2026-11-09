@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Fila Médica | Risco + Retorno
 // @namespace    https://om30.com.br/
-// @version      2.15.1
+// @version      2.15.2
 // @description  Fila médica contínua no padrão Controle de Salas: coleção nativa completa, filtros estáveis, tempo de espera, ações e retorno médico RT de 36h + profissional do Retorno nativo.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Fila-Medica-Risco-Retorno.user.js
@@ -1234,6 +1234,7 @@
 
   const FILTROS = [
     { key: 'TODAS',    label: 'Todas',    cor: '#6c757d' },
+    { key: 'EMERGENCIA', label: 'Emergência', cor: '#dc3545' },
     { key: 'VERMELHO', label: 'Vermelho', cor: '#dc3545' },
     { key: 'AMARELO',  label: 'Amarelo',  cor: '#ffc107' },
     { key: 'VERDE',    label: 'Verde',    cor: '#198754' },
@@ -1339,6 +1340,11 @@
     const m = clean(str).match(/^(AtendimentoPa|AtendimentoAmbulatorial)#(\d+)$/);
     if (!m) return null;
     return { tipo: m[1], id: m[2] };
+  }
+
+  function itemEhEmergencia(item) {
+    // Senhas de emergência são identificadas pelo prefixo EM seguido de número.
+    return /^EM\d/i.test(clean(item?.senha));
   }
 
   function itemEhRetorno(item) {
@@ -1873,6 +1879,7 @@
   }
 
   function filtrarItens(itens, filtro) {
+    if (filtro === 'EMERGENCIA') return itens.filter(itemEhEmergencia);
     if (filtro === 'RETORNO') return itens.filter(itemEhRetorno);
     if (['VERMELHO', 'AMARELO', 'VERDE', 'AZUL'].includes(filtro)) {
       return itens.filter(item => riscoItem(item) === filtro);
@@ -1947,6 +1954,7 @@
   function contarFila(itens) {
     const contagem = {
       TODAS: 0,
+      EMERGENCIA: 0,
       VERMELHO: 0,
       AMARELO: 0,
       VERDE: 0,
@@ -1955,6 +1963,7 @@
     };
     for (const item of Array.isArray(itens) ? itens : []) {
       contagem.TODAS++;
+      if (itemEhEmergencia(item)) contagem.EMERGENCIA++;
       const risco = riscoItem(item);
       if (contagem[risco] != null) contagem[risco]++;
       if (itemEhRetorno(item)) contagem.RETORNO++;
@@ -1970,6 +1979,7 @@
     const agora = Date.now();
     const dados = {
       TODAS:    { qtd: c.TODAS,    media: mediaEspera(itens, null, agora) },
+      EMERGENCIA: { qtd: c.EMERGENCIA, media: null },
       VERMELHO: { qtd: c.VERMELHO, media: mediaEspera(itens, 'VERMELHO', agora) },
       AMARELO:  { qtd: c.AMARELO,  media: mediaEspera(itens, 'AMARELO', agora) },
       VERDE:    { qtd: c.VERDE,    media: mediaEspera(itens, 'VERDE', agora) },
@@ -1989,6 +1999,8 @@
       if (media) {
         if (key === 'RETORNO') {
           media.textContent = `${info.qtd === 1 ? 'retorno' : 'retornos'} na fila`;
+        } else if (key === 'EMERGENCIA') {
+          media.textContent = `${info.qtd === 1 ? 'senha' : 'senhas'} EM na fila`;
         } else if ((info.qtd ?? 0) > 0) {
           media.innerHTML = `Tempo Médio <strong>${formatarTempoEspera(info.media)}</strong>`;
         } else {
