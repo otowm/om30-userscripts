@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Ausentes Acolhimento e Fila Médica | Origem
 // @namespace    https://om30.com.br/
-// @version      2.4.1
+// @version      2.4.2
 // @description  Ausentes do acolhimento e da fila médica separados por origem (Acolhimento x Fila Médica x Outros), devolução da mesma senha ao remover a ausência e liberação de senha presa em outro profissional ao chamar.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Ausentes-Acolhimento.user.js
@@ -1134,6 +1134,14 @@
 (() => {
   'use strict';
 
+  // v2.4.2:
+  // - Filtro da fila do acolhimento (Preferencial/Retorno/Dentista) voltava a mostrar todas as linhas:
+  //   a regra que esconde exigia a tabela dentro de .collection-with-search-atendimento, que não existe
+  //   na tela do acolhimento do PS. Agora esconde em qualquer tabela.
+  //
+  // v2.4.1:
+  // - Envio das chamadas para o Worker ps (histórico de chamadas por senha).
+  //
   // v2.3.17 (candidata, não publicada):
   // - Presença: o acolhimento só mostra "Em atendimento" de ficha aberta no setor ACOLHIMENTO.
   //
@@ -4874,19 +4882,20 @@
       '#om30-acolh-resumo .om30-acolh-filtro .om30-acolh-qtd{font-size:17px;}',
       '#om30-acolh-resumo .om30-acolh-media{grid-column:1 / -1;font-style:normal;font-size:10px;color:#7a8590;white-space:nowrap;}',
       '#om30-acolh-resumo .om30-acolh-media b{color:#35404a;font-weight:800;}',
-      '.collection-with-search-atendimento tr.om30-acolh-fora-filtro{display:none!important;}',
+      // Sem depender de wrapper: na unidade do PS a tabela não fica dentro de .collection-with-search-atendimento.
+      'tr.om30-acolh-fora-filtro{display:none!important;}',
       '#om30-acolh-resumo .om30-acolh-horario{margin-left:auto;}',
       '#om30-acolh-resumo .om30-acolh-horario strong{font-size:18px;}',
-      '.collection-with-search-atendimento .om30-acolh-th-espera{display:block;margin-top:2px;font-size:8px;font-weight:700;color:#8a949c;text-transform:none;white-space:nowrap;}',
-      '.collection-with-search-atendimento .om30-acolh-espera{display:inline-flex;align-items:center;gap:4px;margin-top:4px;padding:2px 7px;border-radius:10px;background:#eef1f3;color:#68727b;font-size:9px;line-height:1.25;white-space:nowrap;}',
-      '.collection-with-search-atendimento .om30-acolh-espera strong{color:#303941;font-size:9.5px;font-weight:800;}',
-      '.collection-with-search-atendimento .om30-acolh-clock{font-size:11px;line-height:1;}',
-      '.collection-with-search-atendimento .om30-acolh-idade{display:inline-flex;align-items:center;justify-content:center;min-width:48px;padding:3px 7px;border:1px solid #d8dfe5;border-radius:10px;background:#f7f9fb;color:#46515a;font-size:10px;font-weight:800;white-space:nowrap;}',
-      '.collection-with-search-atendimento tbody td{vertical-align:middle!important;}',
-      '.collection-with-search-atendimento tbody td:nth-child(3),.collection-with-search-atendimento tbody td:nth-child(4){white-space:normal!important;overflow-wrap:anywhere!important;}',
-      '.collection-with-search-atendimento tbody td:last-child{min-width:72px;overflow:visible!important;}',
-      '.collection-with-search-atendimento tbody tr:hover td{background-color:#f7f9fb!important;}',
-      '.collection-with-search-atendimento .dropdown-menu{z-index:3000!important;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) .om30-acolh-th-espera{display:block;margin-top:2px;font-size:8px;font-weight:700;color:#8a949c;text-transform:none;white-space:nowrap;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) .om30-acolh-espera{display:inline-flex;align-items:center;gap:4px;margin-top:4px;padding:2px 7px;border-radius:10px;background:#eef1f3;color:#68727b;font-size:9px;line-height:1.25;white-space:nowrap;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) .om30-acolh-espera strong{color:#303941;font-size:9.5px;font-weight:800;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) .om30-acolh-clock{font-size:11px;line-height:1;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) .om30-acolh-idade{display:inline-flex;align-items:center;justify-content:center;min-width:48px;padding:3px 7px;border:1px solid #d8dfe5;border-radius:10px;background:#f7f9fb;color:#46515a;font-size:10px;font-weight:800;white-space:nowrap;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) tbody td{vertical-align:middle!important;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) tbody td:nth-child(3),:is(.collection-with-search-atendimento,.listagem-fila) tbody td:nth-child(4){white-space:normal!important;overflow-wrap:anywhere!important;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) tbody td:last-child{min-width:72px;overflow:visible!important;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) tbody tr:hover td{background-color:#f7f9fb!important;}',
+      ':is(.collection-with-search-atendimento,.listagem-fila) .dropdown-menu{z-index:3000!important;}',
       '@media(max-width:1100px){#om30-acolh-resumo .om30-acolh-horario{margin-left:0;}}'
     ].join('');
     document.head.appendChild(style);
