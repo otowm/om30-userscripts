@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.58
+// @version      3.0.59
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,11 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.58
+    /* OM30 - CONTROLE DE SALAS v3.0.59
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.59: ficha sem nada guardado sai numa consulta só (1000 senhas mais recentes, ~9 s; antes 2 rodadas, ~16 s); o aquecimento em segundo plano lê 300 a cada 2 min (mesmo custo de 100).
      * v3.0.58: ficha mais rápida (o rastreamento do sistema leva ~10 s: agora as 100 senhas mais recentes são lidas em segundo plano ao abrir e a cada 2 min, e a ficha de quem entra na fila já aparece pronta) e com visual de pílula azul com ícone; número sem os zeros da frente (o clique copia completo).
      * v3.0.57: Raio-X manda para o faturamento sem chave nenhuma (nada para configurar nos PCs).
      * v3.0.56: a chave de envio do Raio-X para o faturamento saiu do código; cada PC da sala de Raio-X guarda a chave uma vez (OM30RaioXFat.chave(...) no console). Sem chave, o envio fica desligado e nada muda no resto.
@@ -6719,8 +6720,8 @@
             const d = String(data || '').match(/(\d{2})\/(\d{2})\/(\d{4})/), h = String(hora || '').match(/(\d{1,2}):(\d{2})/);
             return d ? new Date(+d[3], +d[2] - 1, +d[1], h ? +h[1] : 0, h ? +h[2] : 0).getTime() : 0;
         }
-        async function paginaRastreamento(inicio) {
-            const q = new URLSearchParams({ sEcho: '1', iColumns: '8', sColumns: '', iDisplayStart: String(inicio), iDisplayLength: '100', sSearch: '', bRegex: 'false', iSortCol_0: '0', sSortDir_0: 'asc', iSortingCols: '1' });
+        async function paginaRastreamento(inicio, quantidade = 100) {
+            const q = new URLSearchParams({ sEcho: '1', iColumns: '8', sColumns: '', iDisplayStart: String(inicio), iDisplayLength: String(quantidade), sSearch: '', bRegex: 'false', iSortCol_0: '0', sSortDir_0: 'asc', iSortingCols: '1' });
             for (let i = 0; i < 8; i++) { q.set('mDataProp_' + i, String(i)); q.set('sSearch_' + i, ''); q.set('bRegex_' + i, 'false'); q.set('bSearchable_' + i, 'true'); q.set('bSortable_' + i, 'false'); }
             const r = await fetch('/filas/rastreamento_senhas.json?' + q, { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
             if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -6732,13 +6733,13 @@
             FICHA_VAR.rodando = true;
             const corte = Date.now() - 26 * 3600e3;
             try {
-                for (let p = 0; p < 36 && FICHA_VAR.pendentes.size; p = p === 0 ? 1 : p + 3) {
-                    const paginas = p === 0 ? [0] : [p, p + 1, p + 2];
-                    const lote = await Promise.all(paginas.map(k => paginaRastreamento(k * 100).catch(() => null)));
+                // O sistema leva ~8-10 s por consulta, quase igual para 100 ou 1000 linhas: pede 1000 de uma vez.
+                for (let p = 0; p < 3 && FICHA_VAR.pendentes.size; p++) {
+                    const lote = [await paginaRastreamento(p * 1000, 1000).catch(() => null)];
                     let fimLista = false, achou = false;
                     for (const linhas of lote) {
                         if (!linhas) { fimLista = true; continue; }
-                        if (linhas.length < 100) fimLista = true;
+                        if (linhas.length < 1000) fimLista = true;
                         for (const l of linhas) {
                             const id = (String((l && l[7]) ?? '').match(/atendimentos_pas\/(\d+)/) || [])[1];
                             const f = textoCelula(l[4]);
@@ -6764,7 +6765,7 @@
             if (FICHA_VAR.rodando || document.hidden) return;
             try {
                 let novas = false;
-                for (const l of await paginaRastreamento(0)) {
+                for (const l of await paginaRastreamento(0, 300)) {
                     const id = (String((l && l[7]) ?? '').match(/atendimentos_pas\/(\d+)/) || [])[1], f = textoCelula(l[4]);
                     if (id && fichaValida(f) && (!FICHA.has(id) || FICHA.get(id).estado !== 'ok')) { FICHA.set(id, { estado: 'ok', ficha: f }); FICHA_VAR.pendentes.delete(id); novas = true; }
                 }
