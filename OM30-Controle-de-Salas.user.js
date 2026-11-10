@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.61
+// @version      3.0.65
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,14 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.61
+    /* OM30 - CONTROLE DE SALAS v3.0.65
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.65: o aviso "Senha perdida" do sistema (janela .swal2-modal) agora é reconhecido; na 3.0.64 ele passava despercebido.
+     * v3.0.64: com o aviso "senha perdida" do sistema, o Atender daquele paciente passa a usar o comportamento original do sistema e abre a ficha (antes ficava tentando chamar de novo e não abria).
+     * v3.0.63: o número da ficha aparece só na sala de Raio-X; nas outras salas (Medicação, Exames, Enfermagem) volta o botão "Dados do Munícipe" como era. A ficha em segundo plano só é lida no Raio-X.
+     * v3.0.62: desfaz a espera parada na chamada (3.0.60/3.0.61): a espera volta a contar desde o encaminhamento para a sala, para todos.
      * v3.0.61: tira o rótulo "Esperou"; fica sempre "Espera" (para quem já foi chamado na sala o número continua parado no tempo até a chamada).
      * v3.0.60: espera real: quem já foi chamado nesta sala (Em Andamento) para de contar e mostra "Esperou 4 min" (do encaminhamento até a chamada). Chamada de outro setor, anterior ao encaminhamento, não conta.
      * v3.0.59: ficha sem nada guardado sai numa consulta só (1000 senhas mais recentes, ~9 s; antes 2 rodadas, ~16 s); o aquecimento em segundo plano lê 300 a cada 2 min (mesmo custo de 100).
@@ -5363,6 +5367,10 @@
                             if (str) localStorage.setItem(CS_ATENDIMENTO_CHAMADO, JSON.stringify({ atendimento:str, encaminhamentoStr:String(this.encaminhamentoStr||''), em:Date.now() }));
                         } catch (_) {}
                         const r = original.apply(this, arguments);
+                        if (this.controleSala && r && typeof r.then === 'function') {
+                            const str = String(this.atendimentoStr || '');
+                            r.then(() => marcarSeSenhaPerdida(str), () => marcarSeSenhaPerdida(str));
+                        }
                         if (ROLAR_AO_CHAMAR && this.controleSala && r && typeof r.then === 'function') {
                             r.then(() => this.$nextTick(() => {
                                 const fila = filaChamarProximo();
@@ -5422,7 +5430,8 @@
                     },
                     iniciarAtendimento: original => function () {
                         if (!this.controleSala) return original.apply(this, arguments);
-                        return atender(this);
+                        const args = arguments;
+                        return atender(this, () => original.apply(this, args));
                     },
                 },
                 mounted() {
@@ -6780,7 +6789,7 @@
         // Aquece o cache: o rastreamento demora ~8-10 s para responder; lendo em segundo plano, quando o
         // paciente entra na fila a ficha já está guardada e aparece na hora.
         async function aquecerFichas() {
-            if (FICHA_VAR.rodando || document.hidden) return;
+            if (FICHA_VAR.rodando || document.hidden || !naSalaRaioX()) return;
             try {
                 let novas = false;
                 for (const l of await paginaRastreamento(0, 300)) {
@@ -6805,7 +6814,23 @@
             const curta = String(f.ficha).replace(/^0+(?=\d)/, '');
             return `<span class="cs-ficha" data-cs-copiar="${esc(f.ficha)}" data-cs-rotulo="Ficha" title="Ficha ${esc(f.ficha)} · clique para copiar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>Ficha <b>${esc(curta)}</b></span>`;
         }
+        const naSalaRaioX = () => (setorDaColecao(CS.colecao) || {}).key === 'raio_x';
+        function htmlDocumentosOriginal(it) {
+            const id = idEncaminhamento(it.encaminhamento_id);
+            const d = DOC.get(id);
+            if (!d) return `<button type="button" class="cs-doc-ver" data-cs-doc="${esc(id)}" title="Buscar CPF e CNS no cadastro do munícipe">${csIconeDados()}<span>Dados do Munícipe</span>${csIconeChevron()}</button>`;
+            if (d.estado === 'carregando') return `<span class="cs-doc-nada">${csIconeDados()} buscando CPF/CNS…</span>`;
+            if (d.estado === 'ambiguo') return `<span class="cs-doc-aviso" title="Há ${d.n} cadastros com este nome e nascimento; confira no cadastro do munícipe">${d.n} cadastros iguais — confira no cadastro</span>`;
+            if (d.estado === 'erro') return `<span class="cs-doc-aviso" title="${esc(d.erro)}">CPF/CNS não encontrados</span> <button type="button" class="cs-doc-ver" data-cs-doc="${esc(id)}">${csIconeDados()}<span>tentar de novo</span></button>`;
+            const linha = (rotulo, valor) => valor
+                ? `<span class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" title="Clique para copiar"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span></span>`
+                : `<span class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></span>`;
+            return linha('CPF', d.cpf) + linha('CNS', d.cns);
+        }
+
         function htmlDocumentos(it) {
+            // Ficha só na sala de Raio-X; nas outras salas, o "Dados do Munícipe" de sempre.
+            if (!naSalaRaioX()) return htmlDocumentosOriginal(it);
             // CPF/CNS só aparecem quando já foram buscados (automático para medicação controlada).
             const id = idEncaminhamento(it.encaminhamento_id);
             const d = DOC.get(id);
@@ -7173,9 +7198,7 @@
                 const classes = historico ? N.classesHistorico(lista) : N.classesLinhas(lista);
                 lista.forEach((it, i) => {
                     it.__csClasse = classes[i];
-                    const parada = !historico && it.status === 'Em Andamento' ? N.esperaAteChamada(it) : '';
-                    it.cs_esperaParada = !!parada;
-                    it.cs_espera = historico ? '' : (parada || N.espera(it, agora));
+                    it.cs_espera = historico ? '' : N.espera(it, agora);
                 });
 
                 CS.itens = new Map(todos.map(it => [it.encaminhamento_id, it]));
@@ -7289,13 +7312,32 @@
         // aparece depois do "Chamar Paciente". O Atender da tabela segue o mesmo caminho:
         // se o paciente ainda não foi chamado, chama (igual ao ícone da linha) e deixa o
         // "Confirmar atendimento" pronto; se já foi chamado, confirma.
-        async function atender(btn) {
+        // "Senha perdida": o sistema não consegue chamar a senha. Quando o aviso aparece depois de um Chamar,
+        // aquele atendimento passa a usar o Atender original do sistema (que abre a ficha).
+        const SENHA_PERDIDA = new Set();
+        function avisoSenhaPerdida() {
+            // O aviso do sistema é SweetAlert2 antigo (.swal2-modal dentro de .swal2-container fixo).
+            return [...document.querySelectorAll('.swal2-modal, .swal2-popup, .swal2-container, .sweet-alert, .swal-modal, .toast, .toast-message, .alert, .modal.show, .modal.in, [role="alert"], [role="dialog"]')]
+                .some(e => (e.getClientRects ? e.getClientRects().length > 0 : e.offsetParent !== null) && /senha\s+perdida/i.test(e.textContent || ''));
+        }
+        async function marcarSeSenhaPerdida(atendimentoStr) {
+            if (!atendimentoStr) return false;
+            for (let i = 0; i < 12; i++) {   // o aviso pode aparecer alguns instantes depois
+                if (avisoSenhaPerdida()) { SENHA_PERDIDA.add(String(atendimentoStr)); return true; }
+                await new Promise(r => setTimeout(r, 150));
+            }
+            return SENHA_PERDIDA.has(String(atendimentoStr));
+        }
+
+        async function atender(btn, nativo) {
             if (btn.__csAbrindo) return;
             if (emOutraSala(btn.encaminhamentoStr)) {
                 return swalSeguro({ type: 'warning', title: 'Paciente em outra sala', html: 'Este paciente está sendo atendido em outra sala no momento.' });
             }
             // Sem senha não existe chamada nem "Confirmar atendimento": o sistema abre direto.
             if (!btn.enfileirado) return btn.definicoesInicioAtendimento();
+            // Senha perdida: chamar não adianta; segue o Atender original do sistema.
+            if (nativo && SENHA_PERDIDA.has(String(btn.atendimentoStr))) return nativo();
 
             const fila = filaChamarProximo();
             if (!fila) return swalSeguro({ type: 'error', title: 'Fila não encontrada', html: 'Use o ícone de chamar da linha.' });
@@ -7316,6 +7358,8 @@
                 btn.__csAbrindo = false;
                 btn.desbloqueiBotaoAtendimento();
             }
+            const depois = filaChamarProximo();
+            if (nativo && !(depois && depois.proximoFila && pacienteChamado(depois, btn)) && await marcarSeSenhaPerdida(btn.atendimentoStr)) return nativo();
             if (fila.proximoFila && pacienteChamado(fila, btn)) {
                 aviso(`${nomeDaLinha(btn)} chamado. Quando chegar, clique em "Confirmar atendimento" (ou em Atender de novo).`);
             }
