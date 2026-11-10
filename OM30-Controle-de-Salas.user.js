@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.65
+// @version      3.0.66
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,11 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.65
+    /* OM30 - CONTROLE DE SALAS v3.0.66
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.66: na ficha de Exames/Raio-X/Enfermagem, a Situação muda na hora para REALIZADO (verde) ou CANCELADO (vermelho) ao clicar em Realizar/Cancelar; antes ficava PENDENTE até salvar.
      * v3.0.65: o aviso "Senha perdida" do sistema (janela .swal2-modal) agora é reconhecido; na 3.0.64 ele passava despercebido.
      * v3.0.64: com o aviso "senha perdida" do sistema, o Atender daquele paciente passa a usar o comportamento original do sistema e abre a ficha (antes ficava tentando chamar de novo e não abria).
      * v3.0.63: o número da ficha aparece só na sala de Raio-X; nas outras salas (Medicação, Exames, Enfermagem) volta o botão "Dados do Munícipe" como era. A ficha em segundo plano só é lida no Raio-X.
@@ -4039,6 +4040,39 @@
             }
         };
         if(document.body)ligarDestino();else document.addEventListener('DOMContentLoaded',ligarDestino,{once:true});
+    }
+
+    // Situação do item na ficha de Exames/Raio-X/Enfermagem: o Realizar/Cancelar do sistema
+    // só marca o campo escondido e o texto fica "PENDENTE" até salvar. Aqui o texto acompanha.
+    if (fichaOutraSala) {
+        const ehSim = el => !!el && /^(?:true|1)$/i.test(String(el.value || '').trim());
+        function textoSituacao(item) {
+            const li = [...item.querySelectorAll('li.text')].find(l => /^\s*Situa[cç][aã]o\s*$/i.test((l.querySelector('label') || {}).textContent || ''));
+            if (!li) return null;
+            let span = li.querySelector('.cs-sit');
+            if (span) return span;
+            const no = [...li.childNodes].find(n => n.nodeType === 3 && /^\s*PENDENTE\s*$/i.test(n.textContent));
+            if (!no) return null;   // só mexe no que o sistema mostra como PENDENTE
+            span = document.createElement('span');
+            span.className = 'cs-sit';
+            span.dataset.orig = no.textContent.trim();
+            no.replaceWith(span);
+            return span;
+        }
+        function atualizarSituacoes() {
+            for (const item of document.querySelectorAll('.item-encaminhamento-controle-salas')) {
+                const span = textoSituacao(item);
+                if (!span) continue;
+                const feito = ehSim(item.querySelector('input[id$="_realizado"]'));
+                const cancel = ehSim(item.querySelector('input[id$="_cancelado"], input[id$="_cancelada"]'));
+                const txt = feito ? 'REALIZADO' : cancel ? 'CANCELADO' : span.dataset.orig;
+                const cor = feito ? '#15803d' : cancel ? '#b91c1c' : '';
+                if (span.textContent !== txt) span.textContent = txt;
+                if (span.style.color !== cor) { span.style.color = cor; span.style.fontWeight = cor ? '700' : ''; }
+            }
+        }
+        const ligarSituacao = () => { atualizarSituacoes(); setInterval(atualizarSituacoes, 400); };
+        if (document.body) ligarSituacao(); else document.addEventListener('DOMContentLoaded', ligarSituacao, { once: true });
     }
 
     // ============================================================
