@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.52
+// @version      3.0.56
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,14 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.52
+    /* OM30 - CONTROLE DE SALAS v3.0.56
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.56: a chave de envio do Raio-X para o faturamento saiu do código; cada PC da sala de Raio-X guarda a chave uma vez (OM30RaioXFat.chave(...) no console). Sem chave, o envio fica desligado e nada muda no resto.
+     * v3.0.55: a ficha aparece rápido (uma leitura do rastreamento para a fila toda, guardada no navegador; usa também a lista salva pelo Rastreamento de Senhas) e com visual discreto (FICHA em cinza, sem caixa roxa).
+     * v3.0.54: na fila, cada paciente mostra o número da ficha (o mesmo do Rastreamento de Senhas, clique copia) no lugar do botão "Dados do Munícipe"; CPF/CNS continuam aparecendo sozinhos para medicação controlada. Ao clicar em "Chamar", a página sobe até o painel Confirmar atendimento / Paciente ausente / Chamar novamente.
+     * v3.0.53: Raio-X sem faturamento: na sala de Raio-X, os exames finalizados como REALIZADO (paciente, CNS, código SIGTAP, médico) vão para o faturamentops.pages.dev, para o faturamento lançar no médico. Bloco separado no fim do arquivo ("OM30 RAIO-X FATURAMENTO"); só age na sala de Raio-X; só lê, não clica em nada.
      * v3.0.52: ao abrir ou recarregar a página o período volta para "Hoje"; a contagem do título e da barra segue a mesma regra em todos os computadores (Hoje, sem filtro do sistema), mesmo com período 24 horas/Data ou filtro salvo neste PC; o "hoje" usa o relógio do servidor quando o do PC está errado; com a tela visível e a lista mais de 1 min sem atualizar (aba em segundo plano, PC que acordou, ciclo do sistema parado), atualiza sozinha.
      * v3.0.51: aplica o pacote visual completo do layout Claude 3.0.49 (resumo e risco em badges, idade, medicação destacada, via quadrada, Chamar azul, Cancelar separado e tipografia), preservando a lógica atual.
      * v3.0.50: restaura somente o desenho da coluna de ações usado no layout Claude 3.0.49 (botões 30px e largura natural da coluna), preservando toda a lógica atual e a remoção de "obs." vazio.
@@ -4962,6 +4966,10 @@
             .cs-doc-vazio { cursor:default; color:#8a94a0; }
             .cs-doc-vazio:hover { background:none; }
             .cs-doc-nada { color:#8a94a0; font-style:italic; }
+            .cs-ficha{display:inline-flex;align-items:baseline;gap:5px;margin-top:2px;padding:1px 6px;border-radius:5px;cursor:copy;white-space:nowrap;font-variant-numeric:tabular-nums;line-height:1.4}
+            .cs-ficha span{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8a949c}
+            .cs-ficha b{font-size:11px;font-weight:700;color:#2f3b45}
+            .cs-ficha:hover{background:#eef2f5}
             .cs-doc-aviso { color:#a15c00; }
             .cs-alerg-box:empty { display:none; }
             /* Alergia: mesma lógica clínica da v2.0.80, mas em chip compacto na fila. */
@@ -6673,17 +6681,105 @@
         function csIconeChevron() {
             return `<span class="cs-doc-chevron" aria-hidden="true"><svg viewBox="0 0 12 12"><path d="m4 2.5 3.5 3.5L4 9.5"/></svg></span>`;
         }
+        // Número da ficha do atendimento: o mesmo do Rastreamento de Senhas (coluna "Ficha").
+        // Rápido: 1) lista guardada pela tela do Rastreamento neste PC; 2) cache próprio (F5 instantâneo);
+        // 3) UMA varredura do rastreamento nativo (mais recentes primeiro, 3 páginas de 100 por vez) para a
+        // fila toda, parando quando acha todos ou passa de 26 h. Só leitura.
+        const FICHA = new Map(); // id do AtendimentoPa → { estado: 'carregando'|'ok'|'nao', ficha }
+        const FICHA_CACHE = 'om30-cs:fichas:v1', FICHA_CACHE_MS = 30 * 3600e3;
+        const FICHA_VAR = { pendentes: new Set(), rodando: false, timer: null };
+        const atendimentoIdDoItem = it => (String(it?.atendimento_str || '').match(/(\d+)\s*$/) || [])[1] || '';
+        const fichaValida = f => /^\d{5,}$/.test(String(f || ''));
+        (function carregarFichasGuardadas() {
+            try {
+                const o = JSON.parse(localStorage.getItem(FICHA_CACHE) || '{}'), lim = Date.now() - FICHA_CACHE_MS;
+                for (const [id, v] of Object.entries(o || {})) if (v && v.t > lim && fichaValida(v.f)) FICHA.set(id, { estado: 'ok', ficha: v.f });
+            } catch (_) {}
+            try {
+                // Lista salva pelo script do Rastreamento de Senhas: [id, data, hora, nascimento, nome, ficha, senha, status]
+                const r = JSON.parse(localStorage.getItem('om30-rastreamento-unidade:linhas-v1') || 'null');
+                for (const l of (Array.isArray(r && r.linhas) ? r.linhas : [])) {
+                    const id = String((l && l[0]) || ''), f = String((l && l[5]) || '');
+                    if (/^\d+$/.test(id) && fichaValida(f) && !FICHA.has(id)) FICHA.set(id, { estado: 'ok', ficha: f });
+                }
+            } catch (_) {}
+        })();
+        function guardarFichas() {
+            try {
+                const o = JSON.parse(localStorage.getItem(FICHA_CACHE) || '{}') || {}, agora = Date.now(), lim = agora - FICHA_CACHE_MS;
+                for (const k of Object.keys(o)) if (!(o[k] && o[k].t > lim)) delete o[k];
+                for (const [id, v] of FICHA) if (v.estado === 'ok' && !o[id]) o[id] = { f: v.ficha, t: agora };
+                localStorage.setItem(FICHA_CACHE, JSON.stringify(o));
+            } catch (_) {}
+        }
+        const textoCelula = v => { const d = document.createElement('div'); d.innerHTML = String(v ?? ''); return (d.textContent || '').replace(/\s+/g, ' ').trim(); };
+        function instanteCelulas(data, hora) {
+            const d = String(data || '').match(/(\d{2})\/(\d{2})\/(\d{4})/), h = String(hora || '').match(/(\d{1,2}):(\d{2})/);
+            return d ? new Date(+d[3], +d[2] - 1, +d[1], h ? +h[1] : 0, h ? +h[2] : 0).getTime() : 0;
+        }
+        async function paginaRastreamento(inicio) {
+            const q = new URLSearchParams({ sEcho: '1', iColumns: '8', sColumns: '', iDisplayStart: String(inicio), iDisplayLength: '100', sSearch: '', bRegex: 'false', iSortCol_0: '0', sSortDir_0: 'asc', iSortingCols: '1' });
+            for (let i = 0; i < 8; i++) { q.set('mDataProp_' + i, String(i)); q.set('sSearch_' + i, ''); q.set('bRegex_' + i, 'false'); q.set('bSearchable_' + i, 'true'); q.set('bSortable_' + i, 'false'); }
+            const r = await fetch('/filas/rastreamento_senhas.json?' + q, { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const j = await r.json();
+            return Array.isArray(j && j.aaData) ? j.aaData : [];
+        }
+        async function varrerFichas() {
+            if (FICHA_VAR.rodando || !FICHA_VAR.pendentes.size) return;
+            FICHA_VAR.rodando = true;
+            const corte = Date.now() - 26 * 3600e3;
+            try {
+                for (let p = 0; p < 36 && FICHA_VAR.pendentes.size; p += 3) {
+                    const lote = await Promise.all([0, 1, 2].map(k => paginaRastreamento((p + k) * 100).catch(() => null)));
+                    let fimLista = false, achou = false;
+                    for (const linhas of lote) {
+                        if (!linhas) { fimLista = true; continue; }
+                        if (linhas.length < 100) fimLista = true;
+                        for (const l of linhas) {
+                            const id = (String((l && l[7]) ?? '').match(/atendimentos_pas\/(\d+)/) || [])[1];
+                            const f = textoCelula(l[4]);
+                            if (id && fichaValida(f) && (!FICHA.has(id) || FICHA.get(id).estado !== 'ok')) { FICHA.set(id, { estado: 'ok', ficha: f }); achou = true; }
+                            if (id) FICHA_VAR.pendentes.delete(id);
+                            const t = instanteCelulas(textoCelula(l[0]), textoCelula(l[1]));
+                            if (t && t < corte) fimLista = true;
+                        }
+                    }
+                    if (achou) { guardarFichas(); try { pintarMedicacoes(); } catch (_) {} }
+                    if (fimLista) break;
+                }
+            } finally {
+                for (const id of FICHA_VAR.pendentes) if (!FICHA.has(id) || FICHA.get(id).estado === 'carregando') FICHA.set(id, { estado: 'nao' });
+                FICHA_VAR.pendentes.clear();
+                FICHA_VAR.rodando = false;
+                try { pintarMedicacoes(); } catch (_) {}
+            }
+        }
+        function htmlFicha(it) {
+            const aid = atendimentoIdDoItem(it);
+            if (!aid) return '<span class="cs-doc-nada">Ficha —</span>';
+            let f = FICHA.get(aid);
+            if (!f) {
+                f = { estado: 'carregando' }; FICHA.set(aid, f); FICHA_VAR.pendentes.add(aid);
+                clearTimeout(FICHA_VAR.timer); FICHA_VAR.timer = setTimeout(varrerFichas, 50);   // junta a fila toda numa varredura
+            }
+            if (f.estado === 'carregando') return '<span class="cs-doc-nada">Ficha …</span>';
+            if (f.estado !== 'ok') return '<span class="cs-doc-nada" title="Senha não encontrada no Rastreamento de Senhas">Ficha —</span>';
+            return `<span class="cs-ficha" data-cs-copiar="${esc(f.ficha)}" data-cs-rotulo="Ficha" title="Clique para copiar"><span>Ficha</span><b>${esc(f.ficha)}</b></span>`;
+        }
         function htmlDocumentos(it) {
+            // CPF/CNS só aparecem quando já foram buscados (automático para medicação controlada).
             const id = idEncaminhamento(it.encaminhamento_id);
             const d = DOC.get(id);
-            if (!d) return `<button type="button" class="cs-doc-ver" data-cs-doc="${esc(id)}" title="Buscar CPF e CNS no cadastro do munícipe">${csIconeDados()}<span>Dados do Munícipe</span>${csIconeChevron()}</button>`;
-            if (d.estado === 'carregando') return `<span class="cs-doc-nada">${csIconeDados()} buscando CPF/CNS…</span>`;
-            if (d.estado === 'ambiguo') return `<span class="cs-doc-aviso" title="Há ${d.n} cadastros com este nome e nascimento; confira no cadastro do munícipe">${d.n} cadastros iguais — confira no cadastro</span>`;
-            if (d.estado === 'erro') return `<span class="cs-doc-aviso" title="${esc(d.erro)}">CPF/CNS não encontrados</span> <button type="button" class="cs-doc-ver" data-cs-doc="${esc(id)}">${csIconeDados()}<span>tentar de novo</span></button>`;
-            const linha = (rotulo, valor) => valor
-                ? `<span class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" title="Clique para copiar"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span></span>`
-                : `<span class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></span>`;
-            return linha('CPF', d.cpf) + linha('CNS', d.cns);
+            let extra = '';
+            if (d && d.estado === 'ok') {
+                const linha = (rotulo, valor) => valor
+                    ? `<span class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" data-cs-rotulo="${rotulo}" title="Clique para copiar"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span></span>`
+                    : `<span class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></span>`;
+                extra = linha('CPF', d.cpf) + linha('CNS', d.cns);
+            } else if (d && d.estado === 'carregando') extra = '<span class="cs-doc-nada">buscando CPF/CNS…</span>';
+            else if (d && d.estado === 'ambiguo') extra = `<span class="cs-doc-aviso" title="Há ${d.n} cadastros com este nome e nascimento">${d.n} cadastros iguais</span>`;
+            return htmlFicha(it) + extra;
         }
 
         function cliqueDocumentos(ev) {
@@ -6694,7 +6790,8 @@
             ev.stopPropagation();
             if (ver) return mostrarDocumentos(ver.dataset.csDoc);
             const valor = copiar.dataset.csCopiar;
-            const ok = () => aviso(`${valor.length === 11 ? 'CPF' : 'CNS'} copiado: ${valor}`);
+            const rotulo = copiar.dataset.csRotulo || (valor.length === 11 ? 'CPF' : 'CNS');
+            const ok = () => aviso(`${rotulo} copiado: ${valor}`);
             if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(valor).then(ok, () => aviso('Não consegui copiar; selecione o número.'));
         }
 
@@ -7732,3 +7829,228 @@
         else document.addEventListener('DOMContentLoaded', iniciar);
     }
 })();
+
+// ===== OM30 ROLAR AO CHAMAR (igual no Acolhimento, Fila Médica e Controle de Salas) =====
+// Ao clicar em "Chamar" numa linha da fila, sobe a página até o painel com
+// "Confirmar atendimento / Paciente ausente / Chamar novamente". Se o painel não aparecer
+// (chamada recusada, erro), não mexe na tela.
+(() => {
+  'use strict';
+  if (window.__OM30_ROLAR_CHAMAR__) return;
+  window.__OM30_ROLAR_CHAMAR__ = true;
+  const texto = el => String(el?.textContent || '').replace(/\s+/g, ' ').trim();
+  const rotulo = el => `${texto(el)} ${el?.getAttribute?.('title') || ''} ${el?.getAttribute?.('aria-label') || ''} ${el?.getAttribute?.('data-original-title') || ''}`.trim();
+  const visivel = el => !!(el && el.offsetParent && el.getClientRects().length);
+  let ate = 0, timer = null;
+  function painel() {
+    const b = [...document.querySelectorAll('button, a')].find(el => /^Confirmar atendimento$/i.test(texto(el)) && visivel(el));
+    return b ? (b.closest('fieldset, .card, .panel, .box, section') || b) : null;
+  }
+  function procurar() {
+    clearTimeout(timer);
+    const alvo = painel();
+    if (alvo) {
+      const topo = alvo.getBoundingClientRect().top + window.scrollY - 90;   // desconta a barra azul do topo
+      if (Math.abs(window.scrollY - Math.max(0, topo)) > 20) window.scrollTo({ top: Math.max(0, topo), behavior: 'smooth' });
+      return;
+    }
+    if (Date.now() < ate) timer = setTimeout(procurar, 150);
+  }
+  document.addEventListener('click', ev => {
+    const b = ev.target?.closest?.('button, a');
+    if (!b || !/^chamar\b/i.test(rotulo(b)) || /novamente/i.test(rotulo(b))) return;
+    ate = Date.now() + 6000;
+    clearTimeout(timer);
+    timer = setTimeout(procurar, 250);
+  }, true);
+})();
+// ===== FIM OM30 ROLAR AO CHAMAR =====
+
+// ===== OM30 RAIO-X FATURAMENTO (bloco separado; para juntar com outra versão, copie daqui até o FIM) =====
+// Controle interno do faturamento (faturamentops.pages.dev, com login autorizado por unidade).
+// - Só age quando a tela do Controle de Salas está na sala de Raio-X e a aba está visível.
+// - A cada 3 min lê os raio-X FINALIZADOS de hoje e de ontem da unidade logada (mesma lista do Histórico),
+//   abre a ficha de cada encaminhamento novo (procedimentos REALIZADOS e o que já foi lançado no faturamento)
+//   e busca CNS/CPF no cadastro pelo nome + nascimento (só aceita um cadastro exato).
+// - Cada encaminhamento é enviado uma vez; o servidor ignora repetidos.
+// Suporte: OM30RaioXFat.diagnostico() · OM30RaioXFat.enviarDia('2026-11-08')
+(() => {
+  'use strict';
+  // Só na tela do Controle de Salas (o Raio-X é escolhido como local de atendimento nela).
+  if (!/^\/aplicacoes_medicamentos/.test(location.pathname)) return;
+  if (window.__OM30_RAIOX_FAT__) return;
+  window.__OM30_RAIOX_FAT__ = true;
+
+  const API = 'https://faturamentops.pages.dev';
+  // Chave de envio do faturamentops: NÃO fica no código (público). Configure uma vez em cada PC da sala de
+  // Raio-X, no console da tela do Controle de Salas: OM30RaioXFat.chave('...'). Sem chave, o envio fica desligado.
+  const CHAVE_LOCAL = 'om30:raiox-fat:chave';
+  let KEY = (() => { try { return localStorage.getItem(CHAVE_LOCAL) || ''; } catch { return ''; } })();
+  const VERSAO = '1.0.0';
+  const CICLO_MS = 3 * 60000, POR_CICLO = 15, LOTE = 25;
+  const STORE = 'om30:raiox-fat:v1:enviados';
+  const GUARDA_MS = 4 * 86400000;
+
+  const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const norm = v => clean(v).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+  const esperar = ms => new Promise(r => setTimeout(r, ms));
+  const isoDia = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const diaIso = br => { const m = String(br || '').match(/^(\d{2})\/(\d{2})\/(\d{4})/); return m ? `${m[3]}-${m[2]}-${m[1]}` : null; };
+
+  const estado = { ativo: false, ultimoCiclo: 0, enviados: 0, erro: '', rodando: false, pendentes: 0 };
+  let enviados = (() => { try { return JSON.parse(localStorage.getItem(STORE) || '{}') || {}; } catch { return {}; } })();
+  function gravarEnviados() {
+    const corte = Date.now() - GUARDA_MS;
+    for (const [k, t] of Object.entries(enviados)) if (!(t > corte)) delete enviados[k];
+    try { localStorage.setItem(STORE, JSON.stringify(enviados)); } catch {}
+  }
+
+  const unidadeLogada = () => clean(document.querySelector('a[href*="trocar_unidade_saude"]')?.textContent);
+  const usuarioLogado = () => clean(document.querySelector('a.navbar-avatar')?.textContent);
+  function naSalaRaioX() {
+    if (/Raio-X/i.test(document.title)) return true;
+    return /SALA DE RAIO|RADIOGRAFIA/i.test(clean(document.querySelector('#content, .content-wrapper, main')?.textContent).slice(0, 600));
+  }
+
+  async function lerJson(url) {
+    const r = await fetch(url, { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' } });
+    const t = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    try { return JSON.parse(t); } catch { throw new Error(/usuarios\/login|type=["']?password/i.test(t) ? 'sessao' : 'resposta inválida'); }
+  }
+
+  // Lista do Histórico: finalizados (status 4) de um dia.
+  async function finalizadosDoDia(dia) {
+    const itens = [];
+    let tam = 0;
+    for (let page = 1; page <= 20; page++) {
+      const q = `format=json&sortable=%7B%7D&page=${page}&per_page=100&profissional=%7B%7D&status=4&grau_risco=&dataInicial=${dia}&dataFinal=${dia}`;
+      const d = await lerJson(`/encaminhamentos_radiografias?${q}`);
+      const lista = Array.isArray(d) ? d : Array.isArray(d?.data) ? d.data : [];
+      itens.push(...lista);
+      if (!lista.length) break;
+      if (page === 1) tam = lista.length;
+      if (lista.length < tam || lista.length < 100) break;
+    }
+    return itens;
+  }
+
+  // Ficha de consulta do encaminhamento (só leitura): procedimentos e faturamento.
+  async function lerFicha(id) {
+    const r = await fetch(`/encaminhamentos_radiografias/${id}`, { credentials: 'same-origin', cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const html = await r.text();
+    if (/usuarios\/login/.test(r.url)) throw new Error('sessao');
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const procs = [];
+    const tabelas = [...doc.querySelectorAll('table')];
+    const linhasDe = t => [...t.querySelectorAll('tbody tr')].map(tr => [...tr.cells].map(c => clean(c.textContent)));
+    // Tabela "Procedimento | CID | Situação"; a tabela seguinte é a do Faturamento da ficha.
+    const iProc = tabelas.findIndex(t => { const cab = [...t.querySelectorAll('th')].map(th => norm(th.textContent)); return cab[0] === 'PROCEDIMENTO' && cab.includes('SITUACAO'); });
+    if (iProc < 0) throw new Error('ficha sem tabela de procedimentos');
+    const cab = [...tabelas[iProc].querySelectorAll('th')].map(th => norm(th.textContent));
+    const iS = cab.indexOf('SITUACAO'), iC = cab.indexOf('CID');
+    linhasDe(tabelas[iProc]).forEach((l, idx) => {
+      const m = (l[0] || '').match(/^(\d{10})\s*-\s*(.+)$/);
+      procs.push({ idx, codigo: m ? m[1] : '', procedimento: m ? m[2] : l[0] || '', cid: iC >= 0 && l[iC] !== '—' ? l[iC] : '', situacao: norm(l[iS]) });
+    });
+    const fat = tabelas[iProc + 1];
+    const faturamento = fat ? linhasDe(fat).map(l => l.join(' ')).join(' | ').slice(0, 300) : '';
+    return { procs, faturamento };
+  }
+
+  // CNS/CPF: mesma busca de munícipes do prontuário; só vale um cadastro com nome e nascimento exatos.
+  const cacheMunicipe = new Map();
+  async function buscarMunicipe(nome, nascimento) {
+    const chave = `${norm(nome)}|${nascimento}`;
+    if (cacheMunicipe.has(chave)) return cacheMunicipe.get(chave);
+    const busca = async q => { const j = await lerJson(`/municipes/search_padronizado_com_mudanca.json?q=${encodeURIComponent(q)}`); return Array.isArray(j) ? j : (Object.values(j || {}).find(Array.isArray) || []); };
+    const filtra = l => l.filter(m => (norm(m.nome) === norm(nome) || norm(m.nome_social) === norm(nome)) && clean(m.data_nascimento_formatada) === nascimento);
+    let c = filtra(await busca(`${nome} ${nascimento}`.trim()));
+    if (!c.length) c = filtra(await busca(nome));
+    const ids = [...new Set(c.map(m => String(m.id)))];
+    const r = ids.length === 1 ? { status: 'ok', cns: clean(c[0].codigo_cns || c[0].cartao_provisorio), cpf: clean(c[0].cpf_numero_sem_formatacao || c[0].cpf_numero) }
+      : { status: ids.length > 1 ? 'ambiguo' : 'nao_encontrado', cns: '', cpf: '' };
+    cacheMunicipe.set(chave, r);
+    return r;
+  }
+
+  async function enviarLote(unidade, itens) {
+    const r = await fetch(API + '/api/ingest', {
+      method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-OM30-Key': KEY },
+      body: JSON.stringify({ unidade, enviado_por: usuarioLogado(), itens })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.erro || `HTTP ${r.status}`);
+    return j.gravados || 0;
+  }
+
+  async function processar(dias, forcar = false) {
+    const unidade = unidadeLogada();
+    if (!unidade) throw new Error('unidade não identificada');
+    const novos = [];
+    for (const dia of dias) {
+      for (const it of await finalizadosDoDia(dia)) {
+        const id = (String(it.encaminhamento_id || '').match(/(\d+)$/) || [])[1];
+        if (!id) continue;
+        const chave = `${norm(unidade)}|${id}`;
+        if (!forcar && enviados[chave]) continue;
+        novos.push({ id, chave, it });
+      }
+    }
+    estado.pendentes = Math.max(0, novos.length - POR_CICLO);
+    const itens = [], feitos = [];
+    for (const { id, chave, it } of novos.slice(0, forcar ? 200 : POR_CICLO)) {
+      const ficha = await lerFicha(id);
+      const realizados = ficha.procs.filter(p => p.situacao === 'REALIZADO');
+      feitos.push(chave);
+      if (!realizados.length) continue;
+      const nasc = clean(it.data_nascimento_municipe);
+      const mun = await buscarMunicipe(clean(it.nome_municipe), nasc).catch(e => { if (e.message === 'sessao') throw e; return { status: 'nao_encontrado', cns: '', cpf: '' }; });
+      for (const p of realizados) itens.push({
+        enc: Number(id), idx: p.idx, atendimento: (String(it.atendimento_str || '').match(/(\d+)$/) || [])[1] || '',
+        data: diaIso(it.data_encaminhamento) || dias[0], hora: clean(it.hora_encaminhamento), senha: clean(it.senha),
+        nome: clean(it.nome_municipe), nascimento: nasc, cns: mun.cns, cpf: mun.cpf, sexo: '', cns_status: mun.status,
+        codigo: p.codigo, procedimento: p.procedimento, cid: p.cid, medico: clean(it.profissional_responsavel), ja_lancado: ficha.faturamento
+      });
+      await esperar(150);
+    }
+    let gravados = 0;
+    for (let i = 0; i < itens.length; i += LOTE) gravados += await enviarLote(unidade, itens.slice(i, i + LOTE));
+    const agora = Date.now();
+    for (const k of feitos) enviados[k] = agora;
+    gravarEnviados();
+    estado.enviados += gravados;
+    return { encaminhamentos: feitos.length, procedimentos: gravados, faltam: estado.pendentes };
+  }
+
+  async function ciclo() {
+    if (!KEY || estado.rodando || document.hidden || !naSalaRaioX()) return;
+    estado.ativo = true; estado.rodando = true;
+    try {
+      const hoje = new Date(), ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
+      await processar([isoDia(hoje), isoDia(ontem)]);
+      estado.erro = '';
+    } catch (e) {
+      estado.erro = String(e?.message || e);
+    } finally {
+      estado.rodando = false; estado.ultimoCiclo = Date.now();
+    }
+  }
+
+  window.OM30RaioXFat = {
+    versao: VERSAO,
+    // Guarda a chave de envio neste navegador (uma vez por PC). chave('') apaga.
+    chave: v => { KEY = String(v || '').trim(); try { if (KEY) localStorage.setItem(CHAVE_LOCAL, KEY); else localStorage.removeItem(CHAVE_LOCAL); } catch {} if (KEY) setTimeout(ciclo, 500); return KEY ? 'chave guardada neste PC' : 'chave apagada'; },
+    diagnostico: () => ({ versao: VERSAO, configurado: !!KEY, naSalaRaioX: naSalaRaioX(), unidade: unidadeLogada(), ...estado,
+      ultimoCiclo: estado.ultimoCiclo ? new Date(estado.ultimoCiclo).toLocaleTimeString('pt-BR') : null, registrados: Object.keys(enviados).length }),
+    // Reenvia um dia inteiro (ex.: depois de instalar, para pegar dias anteriores). Formato AAAA-MM-DD.
+    enviarDia: async dia => { if (!/^\d{4}-\d{2}-\d{2}$/.test(dia || '')) throw new Error('use AAAA-MM-DD'); return processar([dia], true); }
+  };
+
+  setTimeout(ciclo, 8000);
+  setInterval(ciclo, CICLO_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - estado.ultimoCiclo > CICLO_MS) ciclo(); });
+})();
+// ===== FIM OM30 RAIO-X FATURAMENTO =====
