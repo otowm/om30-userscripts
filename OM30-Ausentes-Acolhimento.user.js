@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Ausentes Acolhimento e Fila Médica | Origem
 // @namespace    https://om30.com.br/
-// @version      2.4.4
+// @version      2.4.6
 // @description  Ausentes do acolhimento e da fila médica separados por origem (Acolhimento x Fila Médica x Outros), devolução da mesma senha ao remover a ausência e liberação de senha presa em outro profissional ao chamar.
 // @author       Pedro Sampaio - Samp
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Ausentes-Acolhimento.user.js
@@ -673,6 +673,42 @@
 })();
 // ===== FIM OM30 SENHAS D1 =====
 
+// ===== OM30 ROLAR AO CHAMAR (igual no Acolhimento, Fila Médica e Controle de Salas) =====
+// Ao clicar em "Chamar" numa linha da fila, sobe a página até o painel com
+// "Confirmar atendimento / Paciente ausente / Chamar novamente". Se o painel não aparecer
+// (chamada recusada, erro), não mexe na tela.
+(() => {
+  'use strict';
+  if (window.__OM30_ROLAR_CHAMAR__) return;
+  window.__OM30_ROLAR_CHAMAR__ = true;
+  const texto = el => String(el?.textContent || '').replace(/\s+/g, ' ').trim();
+  const rotulo = el => `${texto(el)} ${el?.getAttribute?.('title') || ''} ${el?.getAttribute?.('aria-label') || ''} ${el?.getAttribute?.('data-original-title') || ''}`.trim();
+  const visivel = el => !!(el && el.offsetParent && el.getClientRects().length);
+  let ate = 0, timer = null;
+  function painel() {
+    const b = [...document.querySelectorAll('button, a')].find(el => /^Confirmar atendimento$/i.test(texto(el)) && visivel(el));
+    return b ? (b.closest('fieldset, .card, .panel, .box, section') || b) : null;
+  }
+  function procurar() {
+    clearTimeout(timer);
+    const alvo = painel();
+    if (alvo) {
+      const topo = alvo.getBoundingClientRect().top + window.scrollY - 90;   // desconta a barra azul do topo
+      if (Math.abs(window.scrollY - Math.max(0, topo)) > 20) window.scrollTo({ top: Math.max(0, topo), behavior: 'smooth' });
+      return;
+    }
+    if (Date.now() < ate) timer = setTimeout(procurar, 150);
+  }
+  document.addEventListener('click', ev => {
+    const b = ev.target?.closest?.('button, a');
+    if (!b || !/^chamar\b/i.test(rotulo(b)) || /novamente/i.test(rotulo(b))) return;
+    ate = Date.now() + 6000;
+    clearTimeout(timer);
+    timer = setTimeout(procurar, 250);
+  }, true);
+})();
+// ===== FIM OM30 ROLAR AO CHAMAR =====
+
 // ===== OM30 PROFISSIONAL NA FILA (idêntico nos dois scripts) =====
 // Filas do acolhimento (/acolhimentos) e médica (/prontuarios): mostra quem está com cada paciente,
 // no padrão do Controle de Salas.
@@ -851,13 +887,22 @@
     const it = itensValidos(colecao()).find(x => x.atendimento_str === `${tipo}#${id}`);
     return limpo(extra || it?.nome_municipe).slice(0, 80);
   }
+  const fichasAbertas = new Map();   // "Tipo#id" -> janela aberta por este script
   function abrirFicha(url, id, tipo, nome) {
     if (!/^\d{1,14}$/.test(String(id || '')) || !/^[A-Z][A-Za-z]{2,40}$/.test(tipo || '')) return 'SEM_ID';
+    // Endereço de outro site (ex.: Escuta Inicial no v3): segue o fluxo nativo, sem aba nova.
+    let alvo;
+    try { alvo = new URL(url, location.origin); } catch { return 'URL_INVALIDA'; }
+    if (alvo.origin !== location.origin) return 'OUTRO_SITE';
+    // Ficha deste paciente já aberta por este script: traz a aba para frente em vez de abrir outra.
+    const chaveAba = `${tipo}#${id}`, ja = fichasAbertas.get(chaveAba);
+    if (ja && !ja.closed) { try { ja.focus(); } catch {} return 'NOVA_ABA'; }
     // O nome do paciente fica só na marca da aba (título); nunca é enviado ao Cloudflare.
     const tag = { id: String(id), tipo, setor: SETOR, local: localNome(), nome: nomeDoPaciente(id, tipo, nome), em: Date.now(), sessionId: crypto.randomUUID() };
     let janela = null;
-    try { janela = window.open(url, textoTag(tag)); } catch { janela = null; }
+    try { janela = window.open(alvo.href, textoTag(tag)); } catch { janela = null; }
     if (janela) {
+      fichasAbertas.set(chaveAba, janela);
       // O estado Em atendimento só será exibido após confirmação da ficha no Worker.
       setTimeout(() => void ciclo(), 1800);
       return 'NOVA_ABA';
@@ -1134,6 +1179,14 @@
 (() => {
   'use strict';
 
+  // v2.4.6:
+  // - Junta a 2.4.4 do GitHub (card Emergência no filtro da fila, senhas EM) com:
+  //   ao clicar em "Chamar", a página sobe até o painel Confirmar atendimento / Paciente ausente / Chamar novamente;
+  //   "Confirmar atendimento"/"Atender" não abre aba nova para outro site (v3: segue o fluxo nativo) nem
+  //   uma segunda aba do mesmo paciente (traz a já aberta para frente).
+  //
+  // v2.4.4: card Emergência no filtro da fila (senhas EM).
+  //
   // v2.4.3:
   // - Desfaz a mudança visual da 2.4.2 (etiqueta de espera, idade, células): volta como era no PS.
   //   Fica só a correção do filtro.
