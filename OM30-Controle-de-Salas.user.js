@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.60
+// @version      3.0.61
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,11 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.60
+    /* OM30 - CONTROLE DE SALAS v3.0.61
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.61: tira o rótulo "Esperou"; fica sempre "Espera" (para quem já foi chamado na sala o número continua parado no tempo até a chamada).
      * v3.0.60: espera real: quem já foi chamado nesta sala (Em Andamento) para de contar e mostra "Esperou 4 min" (do encaminhamento até a chamada). Chamada de outro setor, anterior ao encaminhamento, não conta.
      * v3.0.59: ficha sem nada guardado sai numa consulta só (1000 senhas mais recentes, ~9 s; antes 2 rodadas, ~16 s); o aquecimento em segundo plano lê 300 a cada 2 min (mesmo custo de 100).
      * v3.0.58: ficha mais rápida (o rastreamento do sistema leva ~10 s: agora as 100 senhas mais recentes são lidas em segundo plano ao abrir e a cada 2 min, e a ficha de quem entra na fila já aparece pronta) e com visual de pílula azul com ícone; número sem os zeros da frente (o clique copia completo).
@@ -5704,7 +5705,7 @@
                     novos.push(Object.assign({}, c, {
                         label: 'Chegada / espera',
                         class: String(c.class || '') + ' cs-chegada',
-                        formatter: (v, k, item) => [`${String(v || '')} ${item.hora_encaminhamento || ''}`.trim(), item.cs_esperaParada ? 'Esperou' : 'Espera', item.cs_espera].filter(Boolean).join('\n'),
+                        formatter: (v, k, item) => [`${String(v || '')} ${item.hora_encaminhamento || ''}`.trim(), 'Espera', item.cs_espera].filter(Boolean).join('\n'),
                     }));
                 } else if (c.key === 'hora_encaminhamento') {
                     continue;
@@ -6402,7 +6403,7 @@
 
                 if (colChegada >= 0 && tr.children[colChegada] && !CS.historico) {
                     const tdChegada = tr.children[colChegada];
-                    const hChegada = `<div class="cs-chegada-bloco"><div class="cs-chegada-data">${esc(`${it.data_encaminhamento || ''} ${it.hora_encaminhamento || ''}`.trim())}</div><div class="om30-tempo-espera"><div class="om30-espera-topo"><span class="om30-espera-relogio" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg></span><span class="om30-espera-label">${it.cs_esperaParada ? 'Esperou' : 'Espera'}</span></div><strong>${esc(it.cs_espera || '—')}</strong></div></div>`;
+                    const hChegada = `<div class="cs-chegada-bloco"><div class="cs-chegada-data">${esc(`${it.data_encaminhamento || ''} ${it.hora_encaminhamento || ''}`.trim())}</div><div class="om30-tempo-espera"><div class="om30-espera-topo"><span class="om30-espera-relogio" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg></span><span class="om30-espera-label">Espera</span></div><strong>${esc(it.cs_espera || '—')}</strong></div></div>`;
                     if (tdChegada.__csChegadaHtml !== hChegada) {
                         tdChegada.innerHTML = hChegada;
                         tdChegada.__csChegadaHtml = hChegada;
