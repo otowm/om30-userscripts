@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.56
+// @version      3.0.57
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,11 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.56
+    /* OM30 - CONTROLE DE SALAS v3.0.57
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.57: Raio-X manda para o faturamento sem chave nenhuma (nada para configurar nos PCs).
      * v3.0.56: a chave de envio do Raio-X para o faturamento saiu do código; cada PC da sala de Raio-X guarda a chave uma vez (OM30RaioXFat.chave(...) no console). Sem chave, o envio fica desligado e nada muda no resto.
      * v3.0.55: a ficha aparece rápido (uma leitura do rastreamento para a fila toda, guardada no navegador; usa também a lista salva pelo Rastreamento de Senhas) e com visual discreto (FICHA em cinza, sem caixa roxa).
      * v3.0.54: na fila, cada paciente mostra o número da ficha (o mesmo do Rastreamento de Senhas, clique copia) no lugar do botão "Dados do Munícipe"; CPF/CNS continuam aparecendo sozinhos para medicação controlada. Ao clicar em "Chamar", a página sobe até o painel Confirmar atendimento / Paciente ausente / Chamar novamente.
@@ -7882,10 +7883,6 @@
   window.__OM30_RAIOX_FAT__ = true;
 
   const API = 'https://faturamentops.pages.dev';
-  // Chave de envio do faturamentops: NÃO fica no código (público). Configure uma vez em cada PC da sala de
-  // Raio-X, no console da tela do Controle de Salas: OM30RaioXFat.chave('...'). Sem chave, o envio fica desligado.
-  const CHAVE_LOCAL = 'om30:raiox-fat:chave';
-  let KEY = (() => { try { return localStorage.getItem(CHAVE_LOCAL) || ''; } catch { return ''; } })();
   const VERSAO = '1.0.0';
   const CICLO_MS = 3 * 60000, POR_CICLO = 15, LOTE = 25;
   const STORE = 'om30:raiox-fat:v1:enviados';
@@ -7978,7 +7975,7 @@
   async function enviarLote(unidade, itens) {
     const r = await fetch(API + '/api/ingest', {
       method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', 'X-OM30-Key': KEY },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ unidade, enviado_por: usuarioLogado(), itens })
     });
     const j = await r.json().catch(() => ({}));
@@ -8026,7 +8023,7 @@
   }
 
   async function ciclo() {
-    if (!KEY || estado.rodando || document.hidden || !naSalaRaioX()) return;
+    if (estado.rodando || document.hidden || !naSalaRaioX()) return;
     estado.ativo = true; estado.rodando = true;
     try {
       const hoje = new Date(), ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
@@ -8041,9 +8038,7 @@
 
   window.OM30RaioXFat = {
     versao: VERSAO,
-    // Guarda a chave de envio neste navegador (uma vez por PC). chave('') apaga.
-    chave: v => { KEY = String(v || '').trim(); try { if (KEY) localStorage.setItem(CHAVE_LOCAL, KEY); else localStorage.removeItem(CHAVE_LOCAL); } catch {} if (KEY) setTimeout(ciclo, 500); return KEY ? 'chave guardada neste PC' : 'chave apagada'; },
-    diagnostico: () => ({ versao: VERSAO, configurado: !!KEY, naSalaRaioX: naSalaRaioX(), unidade: unidadeLogada(), ...estado,
+    diagnostico: () => ({ versao: VERSAO, naSalaRaioX: naSalaRaioX(), unidade: unidadeLogada(), ...estado,
       ultimoCiclo: estado.ultimoCiclo ? new Date(estado.ultimoCiclo).toLocaleTimeString('pt-BR') : null, registrados: Object.keys(enviados).length }),
     // Reenvia um dia inteiro (ex.: depois de instalar, para pegar dias anteriores). Formato AAAA-MM-DD.
     enviarDia: async dia => { if (!/^\d{4}-\d{2}-\d{2}$/.test(dia || '')) throw new Error('use AAAA-MM-DD'); return processar([dia], true); }
