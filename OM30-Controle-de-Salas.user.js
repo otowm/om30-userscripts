@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.57
+// @version      3.0.58
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,11 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.57
+    /* OM30 - CONTROLE DE SALAS v3.0.58
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.58: ficha mais rápida (o rastreamento do sistema leva ~10 s: agora as 100 senhas mais recentes são lidas em segundo plano ao abrir e a cada 2 min, e a ficha de quem entra na fila já aparece pronta) e com visual de pílula azul com ícone; número sem os zeros da frente (o clique copia completo).
      * v3.0.57: Raio-X manda para o faturamento sem chave nenhuma (nada para configurar nos PCs).
      * v3.0.56: a chave de envio do Raio-X para o faturamento saiu do código; cada PC da sala de Raio-X guarda a chave uma vez (OM30RaioXFat.chave(...) no console). Sem chave, o envio fica desligado e nada muda no resto.
      * v3.0.55: a ficha aparece rápido (uma leitura do rastreamento para a fila toda, guardada no navegador; usa também a lista salva pelo Rastreamento de Senhas) e com visual discreto (FICHA em cinza, sem caixa roxa).
@@ -4967,10 +4968,10 @@
             .cs-doc-vazio { cursor:default; color:#8a94a0; }
             .cs-doc-vazio:hover { background:none; }
             .cs-doc-nada { color:#8a94a0; font-style:italic; }
-            .cs-ficha{display:inline-flex;align-items:baseline;gap:5px;margin-top:2px;padding:1px 6px;border-radius:5px;cursor:copy;white-space:nowrap;font-variant-numeric:tabular-nums;line-height:1.4}
-            .cs-ficha span{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8a949c}
-            .cs-ficha b{font-size:11px;font-weight:700;color:#2f3b45}
-            .cs-ficha:hover{background:#eef2f5}
+            .cs-ficha{display:inline-flex;align-items:center;gap:5px;margin-top:4px;padding:2px 9px;border-radius:999px;background:#eef4ff;border:1px solid #cddcfb;color:#1d4ed8;font-size:10.5px;line-height:1.5;cursor:copy;white-space:nowrap;font-variant-numeric:tabular-nums}
+            .cs-ficha svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+            .cs-ficha b{color:#1e3a8a;font-weight:700}
+            .cs-ficha:hover{background:#dfeaff;border-color:#b6ccf7}
             .cs-doc-aviso { color:#a15c00; }
             .cs-alerg-box:empty { display:none; }
             /* Alergia: mesma lógica clínica da v2.0.80, mas em chip compacto na fila. */
@@ -6731,8 +6732,9 @@
             FICHA_VAR.rodando = true;
             const corte = Date.now() - 26 * 3600e3;
             try {
-                for (let p = 0; p < 36 && FICHA_VAR.pendentes.size; p += 3) {
-                    const lote = await Promise.all([0, 1, 2].map(k => paginaRastreamento((p + k) * 100).catch(() => null)));
+                for (let p = 0; p < 36 && FICHA_VAR.pendentes.size; p = p === 0 ? 1 : p + 3) {
+                    const paginas = p === 0 ? [0] : [p, p + 1, p + 2];
+                    const lote = await Promise.all(paginas.map(k => paginaRastreamento(k * 100).catch(() => null)));
                     let fimLista = false, achou = false;
                     for (const linhas of lote) {
                         if (!linhas) { fimLista = true; continue; }
@@ -6756,6 +6758,21 @@
                 try { pintarMedicacoes(); } catch (_) {}
             }
         }
+        // Aquece o cache: o rastreamento demora ~8-10 s para responder; lendo em segundo plano, quando o
+        // paciente entra na fila a ficha já está guardada e aparece na hora.
+        async function aquecerFichas() {
+            if (FICHA_VAR.rodando || document.hidden) return;
+            try {
+                let novas = false;
+                for (const l of await paginaRastreamento(0)) {
+                    const id = (String((l && l[7]) ?? '').match(/atendimentos_pas\/(\d+)/) || [])[1], f = textoCelula(l[4]);
+                    if (id && fichaValida(f) && (!FICHA.has(id) || FICHA.get(id).estado !== 'ok')) { FICHA.set(id, { estado: 'ok', ficha: f }); FICHA_VAR.pendentes.delete(id); novas = true; }
+                }
+                if (novas) { guardarFichas(); try { pintarMedicacoes(); } catch (_) {} }
+            } catch (_) {}
+        }
+        setTimeout(aquecerFichas, 3000);
+        setInterval(aquecerFichas, 120000);
         function htmlFicha(it) {
             const aid = atendimentoIdDoItem(it);
             if (!aid) return '<span class="cs-doc-nada">Ficha —</span>';
@@ -6766,7 +6783,8 @@
             }
             if (f.estado === 'carregando') return '<span class="cs-doc-nada">Ficha …</span>';
             if (f.estado !== 'ok') return '<span class="cs-doc-nada" title="Senha não encontrada no Rastreamento de Senhas">Ficha —</span>';
-            return `<span class="cs-ficha" data-cs-copiar="${esc(f.ficha)}" data-cs-rotulo="Ficha" title="Clique para copiar"><span>Ficha</span><b>${esc(f.ficha)}</b></span>`;
+            const curta = String(f.ficha).replace(/^0+(?=\d)/, '');
+            return `<span class="cs-ficha" data-cs-copiar="${esc(f.ficha)}" data-cs-rotulo="Ficha" title="Ficha ${esc(f.ficha)} · clique para copiar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>Ficha <b>${esc(curta)}</b></span>`;
         }
         function htmlDocumentos(it) {
             // CPF/CNS só aparecem quando já foram buscados (automático para medicação controlada).
