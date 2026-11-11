@@ -5422,7 +5422,7 @@
 
             /* Risco: etiqueta com o nome */
             .cs-fila td.cs-col-risco.cs-risco-ok { font-size:0 !important; }
-            .cs-fila td.cs-col-risco.cs-risco-ok > :not(.cs-risco-box) { display:none !important; }
+            .cs-fila td.cs-col-risco.cs-risco-ok > :not(.cs-risco-box):not(.cs-vitais-box) { display:none !important; }
             .cs-risco-box { font-size:11px; }
             .cs-risco-pill { display:inline-block; padding:3px 7px; border-radius:3px; font-size:10.5px; font-weight:800; letter-spacing:.04em; line-height:1.2; color:#fff; background:#8a96a3; white-space:nowrap; }
             .cs-rp-vermelho { background:#c62828; } .cs-rp-laranja { background:#e65100; } .cs-rp-amarelo { background:#f5c518; color:#3b2f00; }
@@ -6962,22 +6962,15 @@
             }
         }
 
-        // Nome do munícipe em negrito com a faixa da cor do risco. O texto é o nó do próprio
-        // Vue (só muda de lugar), então as atualizações da tabela continuam valendo.
+        // Nome do munícipe em negrito com a faixa da cor do risco (classe no span do próprio Vue).
         function destacarNome(td, it) {
-            let span = td.querySelector(':scope > .cs-nome-txt');
-            if (!span) {
-                const texto = Array.from(td.childNodes).find(n => n.nodeType === 3 && n.textContent.trim());
-                if (!texto) return;
-                span = document.createElement('span');
-                span.className = 'cs-nome-txt';
-                td.insertBefore(span, texto);
-                span.appendChild(texto);
-            }
+            const span = td.querySelector('.nome-municipe-column');
+            if (!span) return;
             const r = String(it.grau_risco || '').trim().toUpperCase();
             const chave = ({ VERMELHO:'vermelho', LARANJA:'laranja', AMARELO:'amarelo', VERDE:'verde', AZUL:'azul' })[r] || 'sem';
-            const classe = `cs-nome-txt cs-nr-${chave}`;
-            if (span.className !== classe) span.className = classe;
+            span.classList.add('cs-nome-txt');
+            for (const c of [...span.classList]) if (c.startsWith('cs-nr-') && c !== `cs-nr-${chave}`) span.classList.remove(c);
+            span.classList.add(`cs-nr-${chave}`);
         }
 
         function htmlSinaisVitais(it, tr) {
