@@ -20,7 +20,7 @@
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
-     * v3.0.67: sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo da alergia de cada paciente na fila; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
+     * v3.0.67: sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo do risco de cada paciente na fila, em caixa compacta; o nome do munícipe fica em negrito com a faixa da cor do risco; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
      * v3.0.66: na ficha de Exames/Raio-X/Enfermagem, a Situação muda na hora para REALIZADO (verde) ou CANCELADO (vermelho) ao clicar em Realizar/Cancelar; antes ficava PENDENTE até salvar.
      * v3.0.65: o aviso "Senha perdida" do sistema (janela .swal2-modal) agora é reconhecido; na 3.0.64 ele passava despercebido.
      * v3.0.64: com o aviso "senha perdida" do sistema, o Atender daquele paciente passa a usar o comportamento original do sistema e abre a ficha (antes ficava tentando chamar de novo e não abria).
@@ -5243,7 +5243,11 @@
             .cs-hist-hora:empty{display:none}
             .cs-hist-hora-txt{font-size:11px;color:#6b7684;margin-top:2px}
             .cs-vitais-box{display:flex;justify-content:center;margin-top:5px}
-            .cs-vitais{display:inline-block;text-align:left;font-size:10.5px;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:3px 7px;white-space:nowrap;line-height:1.35}
+            .cs-vitais{display:inline-grid;grid-template-columns:auto auto;column-gap:7px;text-align:left;font-size:10px;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:5px;padding:2px 5px;white-space:nowrap;line-height:1.3}
+            .cs-vitais .cs-sv-pa{grid-column:1 / -1}
+            .cs-vitais-vazio{display:inline-block}
+            .cs-nome-txt{display:inline-block;font-size:14px;font-weight:800;color:#0f172a;line-height:1.25;padding:2px 7px 2px 8px;border-left:4px solid var(--cs-nr,#94a3b8);border-radius:4px;background:color-mix(in srgb,var(--cs-nr,#94a3b8) 13%,transparent)}
+            .cs-nr-vermelho{--cs-nr:#c62828} .cs-nr-laranja{--cs-nr:#e65100} .cs-nr-amarelo{--cs-nr:#f5a623} .cs-nr-verde{--cs-nr:#1b6e2e} .cs-nr-azul{--cs-nr:#1565c0} .cs-nr-sem{--cs-nr:#94a3b8}
             .cs-vitais b{font-weight:800}
             .cs-vitais-rot{font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:#64748b;margin-bottom:1px}
             .cs-vitais-vazio{font-style:italic;color:#94a3b8}
@@ -6843,6 +6847,7 @@
                     trocarHtml(caixa(tr.children[colAcao], 'cs-acao-extra', cliqueCancelarSetor), htmlCancelarSetor(it,setor));
                 }
                 if (colNome >= 0 && tr.children[colNome]) {
+                    destacarNome(tr.children[colNome], it);
                     if (!CS.historico) pedirAlergia(it, tr);
                     trocarHtml(caixa(tr.children[colNome], 'cs-alerg-box'), CS.historico ? '' : htmlAlergia(it, tr));
                     if (setor.key === 'medicacao') trocarHtml(caixa(tr.children[colNome], 'cs-hist-hora'), CS.historico ? htmlHoraHistorico(it) : '');
@@ -6957,6 +6962,24 @@
             }
         }
 
+        // Nome do munícipe em negrito com a faixa da cor do risco. O texto é o nó do próprio
+        // Vue (só muda de lugar), então as atualizações da tabela continuam valendo.
+        function destacarNome(td, it) {
+            let span = td.querySelector(':scope > .cs-nome-txt');
+            if (!span) {
+                const texto = Array.from(td.childNodes).find(n => n.nodeType === 3 && n.textContent.trim());
+                if (!texto) return;
+                span = document.createElement('span');
+                span.className = 'cs-nome-txt';
+                td.insertBefore(span, texto);
+                span.appendChild(texto);
+            }
+            const r = String(it.grau_risco || '').trim().toUpperCase();
+            const chave = ({ VERMELHO:'vermelho', LARANJA:'laranja', AMARELO:'amarelo', VERDE:'verde', AZUL:'azul' })[r] || 'sem';
+            const classe = `cs-nome-txt cs-nr-${chave}`;
+            if (span.className !== classe) span.className = classe;
+        }
+
         function htmlSinaisVitais(it, tr) {
             const enc=idEncaminhamento(it.encaminhamento_id);
             const direto=enc&&ALERG.porEncDados.get(enc);
@@ -6965,7 +6988,7 @@
             const raw=(clinico||direto)?._v280;
             const sv=raw?.sinaisVitais;
             if(!Array.isArray(sv)) return '';
-            if(sv.length) return `<div class="cs-vitais" title="Sinais vitais do acolhimento (prontuário)"><div class="cs-vitais-rot">Sinais vitais</div>${sv.map(x=>`<div><b>${esc(x.rotulo)}</b> ${esc(x.valor)}</div>`).join('')}</div>`;
+            if(sv.length) return `<div class="cs-vitais" title="Sinais vitais do acolhimento (prontuário)">${sv.map(x=>`<span${x.rotulo==='PA'?' class="cs-sv-pa"':''}><b>${esc(x.rotulo)}</b> ${esc(x.valor)}</span>`).join('')}</div>`;
             return raw.alergiaConsultaFeita===true?'<div class="cs-vitais cs-vitais-vazio">SV não aferidos</div>':'';
         }
 
