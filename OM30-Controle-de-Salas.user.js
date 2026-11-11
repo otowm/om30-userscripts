@@ -20,7 +20,7 @@
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
-     * v3.0.67: CPF/CNS num cartão com o número em destaque e cópia pelo ícone (vira ✓ ao copiar); sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo do risco de cada paciente na fila, em caixa compacta; o nome do munícipe fica em negrito com a faixa da cor do risco; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
+     * v3.0.67: depois de salvar a ficha, a tela de consulta (só Imprimir/Sair) é pulada e volta direto para a lista (SAIR_DIRETO_APOS_SALVAR); CPF/CNS num cartão com o número em destaque e cópia pelo ícone (vira ✓ ao copiar); sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo do risco de cada paciente na fila, em caixa compacta; o nome do munícipe fica em negrito com a faixa da cor do risco; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
      * v3.0.66: na ficha de Exames/Raio-X/Enfermagem, a Situação muda na hora para REALIZADO (verde) ou CANCELADO (vermelho) ao clicar em Realizar/Cancelar; antes ficava PENDENTE até salvar.
      * v3.0.65: o aviso "Senha perdida" do sistema (janela .swal2-modal) agora é reconhecido; na 3.0.64 ele passava despercebido.
      * v3.0.64: com o aviso "senha perdida" do sistema, o Atender daquele paciente passa a usar o comportamento original do sistema e abre a ficha (antes ficava tentando chamar de novo e não abria).
@@ -85,6 +85,11 @@
     // O próximo destino aparece como aviso rápido na página seguinte, em vez de
     // exigir o clique em OK. Com false, o popup com o destino continua como antes.
     const PULAR_POPUP_CONCLUSAO = true;
+
+    // Depois de salvar a ficha, o sistema abre a consulta dela (só "Imprimir" e "Sair").
+    // Com true, essa tela é pulada: segue o "Sair" dela e volta direto para a lista.
+    // Abrir a consulta pela lupa ou pelo Histórico continua igual.
+    const SAIR_DIRETO_APOS_SALVAR = true;
 
     // No Histórico da Medicação, 'automatico' lê a ficha de medicação (PDF de impressão)
     // de cada finalizado para mostrar a hora da aplicação, 2 por vez, guardado no
@@ -4156,6 +4161,7 @@
             if(modal.dataset.om30DestinoProcessando==='1'||modal.dataset.om30DestinoResolvido==='1') continue;
 
             modal.dataset.om30DestinoProcessando='1';
+            try{sessionStorage.setItem('cs-sair-pos-salvar',String(Date.now()));}catch(e){}
             const box=csPrepararPopup(modal);
 
             let destino=null;
@@ -4218,9 +4224,38 @@
         document.body.appendChild(el);
         setTimeout(()=>el.remove(),6000);
     }
-    if(PULAR_POPUP_CONCLUSAO){
-        if(document.body)csMostrarAvisoPosConclusao();else document.addEventListener('DOMContentLoaded',csMostrarAvisoPosConclusao,{once:true});
+    // Tela de consulta logo depois de salvar (SAIR_DIRETO_APOS_SALVAR): a marca vale 2 min e
+    // é apagada em qualquer página carregada, para não pular uma consulta aberta depois.
+    function csMarcaSairPosSalvar(){
+        let em=0;
+        try{em=Number(sessionStorage.getItem('cs-sair-pos-salvar'))||0;sessionStorage.removeItem('cs-sair-pos-salvar');}catch(e){}
+        return em&&Date.now()-em<120000;
     }
+    function csSairDaConsultaPosSalvar(){
+        if(!document.querySelector('.imprimir-documentos-controle-salas')) return false;
+        // O "Sair" do formulário, não o do topo (/usuarios/sair desloga).
+        const sair=Array.from(document.querySelectorAll('fieldset.buttons a[href]'))
+            .find(a=>/^\s*sair\s*$/i.test(a.textContent)&&!/\/usuarios\/sair/i.test(a.getAttribute('href')||''));
+        if(!sair) return false;
+        location.replace(sair.href);
+        return true;
+    }
+    const csSairAgora=SAIR_DIRETO_APOS_SALVAR&&csMarcaSairPosSalvar();
+    if(csSairAgora){
+        // Esconde a página enquanto decide, para a consulta não piscar na tela.
+        const oculta=document.createElement('style');
+        oculta.id='cs-oculta-consulta';
+        oculta.textContent='html{visibility:hidden !important}';
+        const por=()=>{const alvo=document.head||document.documentElement;if(alvo)alvo.appendChild(oculta);return !!alvo;};
+        if(!por()){const mo=new MutationObserver(()=>{if(por())mo.disconnect();});mo.observe(document,{childList:true,subtree:true});}
+        setTimeout(()=>oculta.remove(),4000);
+    }
+    function csAoCarregarPagina(){
+        if(csSairAgora&&csSairDaConsultaPosSalvar()) return;
+        document.getElementById('cs-oculta-consulta')?.remove();
+        if(PULAR_POPUP_CONCLUSAO) csMostrarAvisoPosConclusao();
+    }
+    if(document.readyState!=='loading')csAoCarregarPagina();else document.addEventListener('DOMContentLoaded',csAoCarregarPagina,{once:true});
     estilo(`
         .cs-destino-sucesso{margin:11px auto 12px;padding:10px 12px;width:min(330px,88%);box-sizing:border-box;border:1px solid #d8dee5;border-left:4px solid #7D09D5;border-radius:8px;background:#fafafa;color:#263238;text-align:left}
         .cs-destino-label{font-size:10.5px;letter-spacing:.7px;font-weight:900;line-height:1.15;color:#6b7280}
