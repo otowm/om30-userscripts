@@ -5256,7 +5256,7 @@
             .cs-vitais{display:inline-grid;grid-template-columns:auto auto;column-gap:7px;text-align:left;font-size:10px;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:5px;padding:2px 5px;white-space:nowrap;line-height:1.3}
             .cs-vitais .cs-sv-pa{grid-column:1 / -1}
             .cs-vitais-vazio{display:inline-block}
-            .cs-nome-txt{display:inline-block;font-size:14px;font-weight:800;color:#0f172a;line-height:1.25;padding:2px 7px 2px 8px;border-left:4px solid var(--cs-nr,#94a3b8);border-radius:4px;background:color-mix(in srgb,var(--cs-nr,#94a3b8) 13%,transparent)}
+            .cs-nome-txt{display:inline-block;font-size:13px;font-weight:800;color:#0f172a;line-height:1.25;padding:2px 7px 2px 8px;border-left:4px solid var(--cs-nr,#94a3b8);border-radius:4px;background:color-mix(in srgb,var(--cs-nr,#94a3b8) 13%,transparent)}
             .cs-nr-vermelho{--cs-nr:#c62828} .cs-nr-laranja{--cs-nr:#e65100} .cs-nr-amarelo{--cs-nr:#f5a623} .cs-nr-verde{--cs-nr:#1b6e2e} .cs-nr-azul{--cs-nr:#1565c0} .cs-nr-sem{--cs-nr:#94a3b8}
             .cs-vitais b{font-weight:800}
             .cs-vitais-rot{font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:#64748b;margin-bottom:1px}
