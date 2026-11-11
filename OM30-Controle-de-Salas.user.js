@@ -901,7 +901,7 @@
         return {
             RISCO_ORDEM, PERIODOS, dataHora, riscoOrdem, periodoParams, aplicarPeriodo, chaveParams, queryAxios, ordenar, filtrar,
             juntarPaginas, espera, esperaAteChamada, resumo, classesLinhas, STATUS_HISTORICO, ordenarHistorico, classesHistorico, podarRegistro, filtrosParaSalvar, filtrosParaRestaurar, isoDia,
-            via, extrairMedicacoesConsulta, lerTextoFichaPdf, horariosFichaPdf, municipeIdConsulta, escolherMunicipe, soDigitos, formatarCPF, formatarCNS, classificarCpfCns, interpretarAlergia, SALAS_CONSULTA, linhasConsultaSala, pendenciasOutrasSalas, filtroConsultaAtivo, marcarCancelamento, serializarFormulario, conclusaoSenha, resultadoSalvar,
+            via, semAcento, extrairMedicacoesConsulta, lerTextoFichaPdf, horariosFichaPdf, municipeIdConsulta, escolherMunicipe, soDigitos, formatarCPF, formatarCNS, classificarCpfCns, interpretarAlergia, SALAS_CONSULTA, linhasConsultaSala, pendenciasOutrasSalas, filtroConsultaAtivo, marcarCancelamento, serializarFormulario, conclusaoSenha, resultadoSalvar,
         };
     }
     // #endregion nucleo
@@ -6207,8 +6207,8 @@
         function dataFichaDoProduto(id, produto) {
             const c = HORA_FICHA.cache.get(id);
             if (!c) return '';
-            const p = semAcento(produto);
-            const x = c.itens.find(i => { const q = semAcento(i.produto); return q && p && (q.startsWith(p) || p.startsWith(q)); });
+            const p = N.semAcento(produto);
+            const x = c.itens.find(i => { const q = N.semAcento(i.produto); return q && p && (q.startsWith(p) || p.startsWith(q)); });
             return x ? x.data : '';
         }
         // 'dd/mm/aaaa hh:mm:ss' → 'hh:mm' (+ ' de dd/mm' quando não é hoje).
