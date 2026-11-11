@@ -20,7 +20,7 @@
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
-     * v3.0.67: sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo do risco de cada paciente na fila, em caixa compacta; o nome do munícipe fica em negrito com a faixa da cor do risco; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
+     * v3.0.67: CPF/CNS num cartão com o número em destaque e cópia pelo ícone (vira ✓ ao copiar); sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo do risco de cada paciente na fila, em caixa compacta; o nome do munícipe fica em negrito com a faixa da cor do risco; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
      * v3.0.66: na ficha de Exames/Raio-X/Enfermagem, a Situação muda na hora para REALIZADO (verde) ou CANCELADO (vermelho) ao clicar em Realizar/Cancelar; antes ficava PENDENTE até salvar.
      * v3.0.65: o aviso "Senha perdida" do sistema (janela .swal2-modal) agora é reconhecido; na 3.0.64 ele passava despercebido.
      * v3.0.64: com o aviso "senha perdida" do sistema, o Atender daquele paciente passa a usar o comportamento original do sistema e abre a ficha (antes ficava tentando chamar de novo e não abria).
@@ -5225,13 +5225,23 @@
             .cs-doc-icon-emoji{font-size:13px;line-height:1;color:inherit}
             .cs-doc-chevron{width:9px;height:9px;display:inline-flex;align-items:center;justify-content:center;color:#a1a1aa;flex:0 0 9px}
             .cs-doc-chevron svg{width:8px;height:8px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-            .cs-doc-linha{display:inline-flex;align-items:center;gap:6px;min-width:178px;justify-content:flex-start;cursor:copy;white-space:nowrap;font-variant-numeric:tabular-nums;padding:3px 7px;border:1px solid #e2e5e9;border-radius:6px;background:#fafbfc;color:#374151}
-            .cs-doc-linha:hover{background:#fff9e6;border-color:#efd48b}
-            .cs-doc-label{display:inline-flex;align-items:center;justify-content:center;min-width:30px;padding:1px 5px;border-radius:4px;background:#f0e8ff;color:#6d28d9;font-size:9px;font-weight:900;letter-spacing:.03em}
-            .cs-doc-valor{font-size:10.5px;font-weight:700;color:#334155;letter-spacing:.01em}
-            .cs-doc-linha b { color:#5b6672; font-weight:600; }
-            .cs-doc-vazio { cursor:default; color:#8a94a0; }
+            .cs-doc-cartao{width:236px;max-width:100%;margin-top:3px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;box-shadow:0 1px 2px rgba(15,23,42,.07);overflow:hidden;text-align:left}
+            .cs-doc-linha{display:flex;align-items:center;gap:8px;padding:5px 7px;cursor:copy;white-space:nowrap}
+            .cs-doc-linha+.cs-doc-linha{border-top:1px solid #eef2f6}
+            .cs-doc-linha:hover{background:#f8fafc}
+            .cs-doc-label{flex:none;width:30px;text-align:center;background:#334155;color:#fff;font-size:9px;font-weight:800;letter-spacing:.06em;border-radius:4px;padding:2px 0;line-height:1.3}
+            .cs-doc-valor{flex:1;font-size:13px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+            .cs-doc-cp{flex:none;width:24px;height:24px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
+            .cs-doc-cp svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+            .cs-doc-cp .cs-doc-i-ok{display:none}
+            .cs-doc-linha:hover .cs-doc-cp{background:#2563eb;color:#fff}
+            .cs-doc-linha.cs-doc-ok .cs-doc-cp{background:#dcfce7;color:#15803d}
+            .cs-doc-linha.cs-doc-ok .cs-doc-i-copiar{display:none}
+            .cs-doc-linha.cs-doc-ok .cs-doc-i-ok{display:block}
+            .cs-doc-vazio { cursor:default; }
             .cs-doc-vazio:hover { background:none; }
+            .cs-doc-vazio .cs-doc-label{background:#cbd5e1}
+            .cs-doc-vazio .cs-doc-valor{font-size:11px;font-weight:400;color:#94a3b8;font-style:italic}
             .cs-doc-nada { color:#8a94a0; font-style:italic; }
             .cs-ficha{display:inline-flex;align-items:center;gap:5px;margin-top:4px;padding:2px 9px;border-radius:999px;background:#eef4ff;border:1px solid #cddcfb;color:#1d4ed8;font-size:10.5px;line-height:1.5;cursor:copy;white-space:nowrap;font-variant-numeric:tabular-nums}
             .cs-ficha svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
@@ -7223,6 +7233,15 @@
             return `<span class="cs-ficha" data-cs-copiar="${esc(f.ficha)}" data-cs-rotulo="Ficha" title="Ficha ${esc(f.ficha)} · clique para copiar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>Ficha <b>${esc(curta)}</b></span>`;
         }
         const naSalaRaioX = () => (setorDaColecao(CS.colecao) || {}).key === 'raio_x';
+        // CPF/CNS num cartão: rótulo escuro, número em destaque e cópia pelo ícone (vira ✓ ao copiar).
+        const CS_ICONE_COPIAR = '<svg class="cs-doc-i-copiar" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V2.7a.9.9 0 0 0-.9-.9H2.7a.9.9 0 0 0-.9.9v6.9a.9.9 0 0 0 .9.9h2.8"/></svg><svg class="cs-doc-i-ok" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
+        function htmlCartaoDoc(d) {
+            const linha = (rotulo, valor) => valor
+                ? `<div class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" data-cs-rotulo="${rotulo}" title="Clique para copiar o ${rotulo}"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span><span class="cs-doc-cp">${CS_ICONE_COPIAR}</span></div>`
+                : `<div class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></div>`;
+            return `<div class="cs-doc-cartao">${linha('CPF', d.cpf)}${linha('CNS', d.cns)}</div>`;
+        }
+
         function htmlDocumentosOriginal(it) {
             const id = idEncaminhamento(it.encaminhamento_id);
             const d = DOC.get(id);
@@ -7230,10 +7249,7 @@
             if (d.estado === 'carregando') return `<span class="cs-doc-nada">${csIconeDados()} buscando CPF/CNS…</span>`;
             if (d.estado === 'ambiguo') return `<span class="cs-doc-aviso" title="Há ${d.n} cadastros com este nome e nascimento; confira no cadastro do munícipe">${d.n} cadastros iguais — confira no cadastro</span>`;
             if (d.estado === 'erro') return `<span class="cs-doc-aviso" title="${esc(d.erro)}">CPF/CNS não encontrados</span> <button type="button" class="cs-doc-ver" data-cs-doc="${esc(id)}">${csIconeDados()}<span>tentar de novo</span></button>`;
-            const linha = (rotulo, valor) => valor
-                ? `<span class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" title="Clique para copiar"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span></span>`
-                : `<span class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></span>`;
-            return linha('CPF', d.cpf) + linha('CNS', d.cns);
+            return htmlCartaoDoc(d);
         }
 
         function htmlDocumentos(it) {
@@ -7244,10 +7260,7 @@
             const d = DOC.get(id);
             let extra = '';
             if (d && d.estado === 'ok') {
-                const linha = (rotulo, valor) => valor
-                    ? `<span class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" data-cs-rotulo="${rotulo}" title="Clique para copiar"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span></span>`
-                    : `<span class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></span>`;
-                extra = linha('CPF', d.cpf) + linha('CNS', d.cns);
+                extra = htmlCartaoDoc(d);
             } else if (d && d.estado === 'carregando') extra = '<span class="cs-doc-nada">buscando CPF/CNS…</span>';
             else if (d && d.estado === 'ambiguo') extra = `<span class="cs-doc-aviso" title="Há ${d.n} cadastros com este nome e nascimento">${d.n} cadastros iguais</span>`;
             return htmlFicha(it) + extra;
@@ -7262,7 +7275,11 @@
             if (ver) return mostrarDocumentos(ver.dataset.csDoc);
             const valor = copiar.dataset.csCopiar;
             const rotulo = copiar.dataset.csRotulo || (valor.length === 11 ? 'CPF' : 'CNS');
-            const ok = () => aviso(`${rotulo} copiado: ${valor}`);
+            const ok = () => {
+                aviso(`${rotulo} copiado: ${valor}`);
+                copiar.classList.add('cs-doc-ok');
+                setTimeout(() => copiar.classList.remove('cs-doc-ok'), 1600);
+            };
             if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(valor).then(ok, () => aviso('Não consegui copiar; selecione o número.'));
         }
 
