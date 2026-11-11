@@ -5242,9 +5242,10 @@
             .cs-vitais-box:empty{display:none}
             .cs-hist-hora:empty{display:none}
             .cs-hist-hora-txt{font-size:11px;color:#6b7684;margin-top:2px}
-            .cs-vitais{font-size:11px;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:2px 6px;margin-top:2px;white-space:normal;line-height:1.3}
+            .cs-vitais-box{display:flex;justify-content:center;margin-top:5px}
+            .cs-vitais{display:inline-block;text-align:left;font-size:10.5px;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:3px 7px;white-space:nowrap;line-height:1.35}
             .cs-vitais b{font-weight:800}
-            .cs-vitais-rot{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#64748b}
+            .cs-vitais-rot{font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:#64748b;margin-bottom:1px}
             .cs-vitais-vazio{font-style:italic;color:#94a3b8}
             /* Alergia: mesma lógica clínica da v2.0.80, mas em chip compacto na fila. */
             .cs-alerg-box{display:flex;justify-content:center;align-items:flex-start;margin-top:2px;max-width:100%}
@@ -6825,6 +6826,7 @@
                     const chaveRisco = ({ VERMELHO:'vermelho', LARANJA:'laranja', AMARELO:'amarelo', VERDE:'verde', AZUL:'azul' })[nomeRisco] || 'sem';
                     trocarHtml(caixa(tdRisco, 'cs-risco-box'), `<span class="cs-risco-pill cs-rp-${chaveRisco}">${esc(nomeRisco || 'SEM RISCO')}</span>`);
                     tdRisco.classList.add('cs-risco-ok');
+                    trocarHtml(caixa(tdRisco, 'cs-vitais-box'), CS.historico ? '' : htmlSinaisVitais(it, tr));
                 }
                 if (colNasc >= 0 && tr.children[colNasc]) {
                     const tdNasc = tr.children[colNasc];
@@ -6843,7 +6845,6 @@
                 if (colNome >= 0 && tr.children[colNome]) {
                     if (!CS.historico) pedirAlergia(it, tr);
                     trocarHtml(caixa(tr.children[colNome], 'cs-alerg-box'), CS.historico ? '' : htmlAlergia(it, tr));
-                    trocarHtml(caixa(tr.children[colNome], 'cs-vitais-box'), CS.historico ? '' : htmlSinaisVitais(it, tr));
                     if (setor.key === 'medicacao') trocarHtml(caixa(tr.children[colNome], 'cs-hist-hora'), CS.historico ? htmlHoraHistorico(it) : '');
                     trocarHtml(caixa(tr.children[colNome], 'cs-doc-box', cliqueDocumentos), htmlDocumentos(it));
                 }
@@ -6964,8 +6965,8 @@
             const raw=(clinico||direto)?._v280;
             const sv=raw?.sinaisVitais;
             if(!Array.isArray(sv)) return '';
-            if(sv.length) return `<div class="cs-vitais" title="Sinais vitais do acolhimento (prontuário)"><span class="cs-vitais-rot">SV</span> ${sv.map(x=>`<b>${esc(x.rotulo)}</b> ${esc(x.valor)}`).join(' · ')}</div>`;
-            return raw.alergiaConsultaFeita===true?'<div class="cs-vitais cs-vitais-vazio">Sinais vitais: não aferidos</div>':'';
+            if(sv.length) return `<div class="cs-vitais" title="Sinais vitais do acolhimento (prontuário)"><div class="cs-vitais-rot">Sinais vitais</div>${sv.map(x=>`<div><b>${esc(x.rotulo)}</b> ${esc(x.valor)}</div>`).join('')}</div>`;
+            return raw.alergiaConsultaFeita===true?'<div class="cs-vitais cs-vitais-vazio">SV não aferidos</div>':'';
         }
 
         function htmlAlergia(it, tr) {
