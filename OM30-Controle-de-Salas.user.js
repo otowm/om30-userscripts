@@ -5225,14 +5225,14 @@
             .cs-doc-icon-emoji{font-size:13px;line-height:1;color:inherit}
             .cs-doc-chevron{width:9px;height:9px;display:inline-flex;align-items:center;justify-content:center;color:#a1a1aa;flex:0 0 9px}
             .cs-doc-chevron svg{width:8px;height:8px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-            .cs-doc-cartao{width:206px;max-width:100%;margin-top:3px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;box-shadow:0 1px 2px rgba(15,23,42,.07);overflow:hidden;text-align:left}
+            .cs-doc-cartao{position:relative;width:206px;max-width:100%;margin-top:3px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;box-shadow:0 1px 2px rgba(15,23,42,.07);overflow:hidden;text-align:left}
             .cs-doc-linha{display:flex;align-items:center;gap:7px;padding:3px 6px;cursor:copy;white-space:nowrap}
             .cs-doc-linha+.cs-doc-linha{border-top:1px solid #eef2f6}
             .cs-doc-linha:hover{background:#f8fafc}
             .cs-doc-label-cel{flex:none;width:28px;display:flex;align-items:center}
-            .cs-doc-label{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:15px;padding:0 4px;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:0;border-radius:4px;line-height:1}
+            .cs-doc-label{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:15px;padding:1px 4px 0;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:0;border-radius:4px;line-height:1}
             .cs-doc-valor{flex:1;font-size:12px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums;letter-spacing:.02em}
-            .cs-doc-cp{flex:none;width:20px;height:20px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
+            .cs-doc-cp{flex:none;width:19px;height:19px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
             .cs-doc-cp svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
             .cs-doc-cp .cs-doc-i-ok{display:none}
             .cs-doc-linha:hover .cs-doc-cp{background:#2563eb;color:#fff}
@@ -6867,6 +6867,7 @@
                 aplicarPresencaNaLinha(tr, it, setor, campos);
                 sincronizarConfirmarLinha(tr,it);
             });
+            alinharCartoesDoc(vm.$el);
         }
 
         // ── Alergia (MOSTRAR_ALERGIA) ─────────────────────────────────────────
@@ -7234,6 +7235,27 @@
             return `<span class="cs-ficha" data-cs-copiar="${esc(f.ficha)}" data-cs-rotulo="Ficha" title="Ficha ${esc(f.ficha)} · clique para copiar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>Ficha <b>${esc(curta)}</b></span>`;
         }
         const naSalaRaioX = () => (setorDaColecao(CS.colecao) || {}).key === 'raio_x';
+        // O cartão fica centrado numa coluna de largura quebrada e cairia em meio pixel, o que
+        // descentraliza o texto dos rótulos CPF/CNS. Desloca cada cartão para o pixel inteiro.
+        function alinharCartoesDoc(raiz) {
+            const cartoes = raiz ? Array.from(raiz.querySelectorAll('.cs-doc-cartao')) : [];
+            if (!cartoes.length) return;
+            for (const c of cartoes) { c.style.left = ''; c.style.top = ''; }
+            const dpr = window.devicePixelRatio || 1;
+            const resto = v => (v * dpr - Math.round(v * dpr)) / dpr;
+            const rets = cartoes.map(c => c.getBoundingClientRect());
+            cartoes.forEach((c, i) => {
+                const fx = resto(rets[i].left), fy = resto(rets[i].top);
+                if (fx) c.style.left = `${-fx}px`;
+                if (fy) c.style.top = `${-fy}px`;
+            });
+        }
+        let csAlinharTimer = 0;
+        window.addEventListener('resize', () => {
+            clearTimeout(csAlinharTimer);
+            csAlinharTimer = setTimeout(() => alinharCartoesDoc(document.querySelector('.cs-fila') || document.body), 150);
+        });
+
         // CPF/CNS num cartão: rótulo escuro, número em destaque e cópia pelo ícone (vira ✓ ao copiar).
         const CS_ICONE_COPIAR = '<svg class="cs-doc-i-copiar" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V2.7a.9.9 0 0 0-.9-.9H2.7a.9.9 0 0 0-.9.9v6.9a.9.9 0 0 0 .9.9h2.8"/></svg><svg class="cs-doc-i-ok" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
         function htmlCartaoDoc(d) {
