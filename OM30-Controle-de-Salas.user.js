@@ -5229,7 +5229,8 @@
             .cs-doc-linha{display:flex;align-items:center;gap:7px;padding:3px 6px;cursor:copy;white-space:nowrap}
             .cs-doc-linha+.cs-doc-linha{border-top:1px solid #eef2f6}
             .cs-doc-linha:hover{background:#f8fafc}
-            .cs-doc-label{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:27px;height:15px;padding:0;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:0;border-radius:4px;line-height:1}
+            .cs-doc-label-cel{flex:none;width:28px;display:flex;align-items:center}
+            .cs-doc-label{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:15px;padding:0 4px;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:0;border-radius:4px;line-height:1}
             .cs-doc-valor{flex:1;font-size:12px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums;letter-spacing:.02em}
             .cs-doc-cp{flex:none;width:20px;height:20px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
             .cs-doc-cp svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
@@ -7237,8 +7238,8 @@
         const CS_ICONE_COPIAR = '<svg class="cs-doc-i-copiar" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V2.7a.9.9 0 0 0-.9-.9H2.7a.9.9 0 0 0-.9.9v6.9a.9.9 0 0 0 .9.9h2.8"/></svg><svg class="cs-doc-i-ok" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
         function htmlCartaoDoc(d) {
             const linha = (rotulo, valor) => valor
-                ? `<div class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" data-cs-rotulo="${rotulo}" title="Clique para copiar o ${rotulo}"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">${esc(valor)}</span><span class="cs-doc-cp">${CS_ICONE_COPIAR}</span></div>`
-                : `<div class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label">${rotulo}</span><span class="cs-doc-valor">não cadastrado</span></div>`;
+                ? `<div class="cs-doc-linha" data-cs-copiar="${esc(valor.replace(/\D/g, ''))}" data-cs-rotulo="${rotulo}" title="Clique para copiar o ${rotulo}"><span class="cs-doc-label-cel"><span class="cs-doc-label">${rotulo}</span></span><span class="cs-doc-valor">${esc(valor)}</span><span class="cs-doc-cp">${CS_ICONE_COPIAR}</span></div>`
+                : `<div class="cs-doc-linha cs-doc-vazio"><span class="cs-doc-label-cel"><span class="cs-doc-label">${rotulo}</span></span><span class="cs-doc-valor">não cadastrado</span></div>`;
             return `<div class="cs-doc-cartao">${linha('CPF', d.cpf)}${linha('CNS', d.cns)}</div>`;
         }
 
