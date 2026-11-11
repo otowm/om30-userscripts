@@ -5229,7 +5229,7 @@
             .cs-doc-linha{display:flex;align-items:center;gap:7px;padding:3px 6px;cursor:copy;white-space:nowrap}
             .cs-doc-linha+.cs-doc-linha{border-top:1px solid #eef2f6}
             .cs-doc-linha:hover{background:#f8fafc}
-            .cs-doc-label{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:27px;height:15px;padding:0 0 0 .06em;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:.06em;border-radius:4px;line-height:1}
+            .cs-doc-label{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:27px;height:15px;padding:0;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:0;border-radius:4px;line-height:1}
             .cs-doc-valor{flex:1;font-size:12px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums;letter-spacing:.02em}
             .cs-doc-cp{flex:none;width:20px;height:20px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
             .cs-doc-cp svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
