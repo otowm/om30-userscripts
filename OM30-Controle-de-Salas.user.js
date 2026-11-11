@@ -5225,14 +5225,14 @@
             .cs-doc-icon-emoji{font-size:13px;line-height:1;color:inherit}
             .cs-doc-chevron{width:9px;height:9px;display:inline-flex;align-items:center;justify-content:center;color:#a1a1aa;flex:0 0 9px}
             .cs-doc-chevron svg{width:8px;height:8px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-            .cs-doc-cartao{width:236px;max-width:100%;margin-top:3px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;box-shadow:0 1px 2px rgba(15,23,42,.07);overflow:hidden;text-align:left}
-            .cs-doc-linha{display:flex;align-items:center;gap:8px;padding:5px 7px;cursor:copy;white-space:nowrap}
+            .cs-doc-cartao{width:206px;max-width:100%;margin-top:3px;background:#fff;border:1px solid #e2e8f0;border-radius:9px;box-shadow:0 1px 2px rgba(15,23,42,.07);overflow:hidden;text-align:left}
+            .cs-doc-linha{display:flex;align-items:center;gap:7px;padding:3px 6px;cursor:copy;white-space:nowrap}
             .cs-doc-linha+.cs-doc-linha{border-top:1px solid #eef2f6}
             .cs-doc-linha:hover{background:#f8fafc}
-            .cs-doc-label{flex:none;width:30px;text-align:center;background:#334155;color:#fff;font-size:9px;font-weight:800;letter-spacing:.06em;border-radius:4px;padding:2px 0;line-height:1.3}
-            .cs-doc-valor{flex:1;font-size:13px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums;letter-spacing:.02em}
-            .cs-doc-cp{flex:none;width:24px;height:24px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
-            .cs-doc-cp svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+            .cs-doc-label{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:27px;height:15px;padding:0 0 0 .06em;background:#334155;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:.06em;border-radius:4px;line-height:1}
+            .cs-doc-valor{flex:1;font-size:12px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+            .cs-doc-cp{flex:none;width:20px;height:20px;border-radius:6px;background:#eef4ff;color:#2563eb;display:grid;place-items:center}
+            .cs-doc-cp svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
             .cs-doc-cp .cs-doc-i-ok{display:none}
             .cs-doc-linha:hover .cs-doc-cp{background:#2563eb;color:#fff}
             .cs-doc-linha.cs-doc-ok .cs-doc-cp{background:#dcfce7;color:#15803d}
@@ -5241,7 +5241,7 @@
             .cs-doc-vazio { cursor:default; }
             .cs-doc-vazio:hover { background:none; }
             .cs-doc-vazio .cs-doc-label{background:#cbd5e1}
-            .cs-doc-vazio .cs-doc-valor{font-size:11px;font-weight:400;color:#94a3b8;font-style:italic}
+            .cs-doc-vazio .cs-doc-valor{font-size:10.5px;font-weight:400;color:#94a3b8;font-style:italic}
             .cs-doc-nada { color:#8a94a0; font-style:italic; }
             .cs-ficha{display:inline-flex;align-items:center;gap:5px;margin-top:4px;padding:2px 9px;border-radius:999px;background:#eef4ff;border:1px solid #cddcfb;color:#1d4ed8;font-size:10.5px;line-height:1.5;cursor:copy;white-space:nowrap;font-variant-numeric:tabular-nums}
             .cs-ficha svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
