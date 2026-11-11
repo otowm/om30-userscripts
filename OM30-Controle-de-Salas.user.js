@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OM30 - Controle de Salas
 // @namespace    om30-guaruja
-// @version      3.0.66
+// @version      3.0.67
 // @updateURL    https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @downloadURL  https://raw.githubusercontent.com/pdrjsampaio/om30-userscripts/main/OM30-Controle-de-Salas.user.js
 // @description  Controle de Salas OM30: fila, histórico, risco, dados do munícipe, medicação, alergia, cancelamento, pendências e presença Cloudflare.
@@ -16,10 +16,11 @@
 (function () {
     'use strict';
 
-    /* OM30 - CONTROLE DE SALAS v3.0.66
+    /* OM30 - CONTROLE DE SALAS v3.0.67
      * Arquitetura unificada e leve para o Controle de Salas.
      * Recursos compartilham o mesmo ciclo da fila, evitando observers/timers concorrentes.
      * Segurança: /edit nunca é consultado passivamente.
+     * v3.0.67: sinais vitais do acolhimento (PA, temperatura, FC, FR, glicemia, saturação, peso) aparecem embaixo da alergia de cada paciente na fila; o aviso "Encaminhamento concluído" fecha sozinho depois de salvar a ficha e o próximo destino aparece como aviso na página seguinte (PULAR_POPUP_CONCLUSAO); no Histórico da Medicação aparece a hora de cada cancelamento (com quem cancelou e o motivo) e de cada aplicação (lida da ficha de medicação; HORARIO_HISTORICO = 'sem_pdf' desliga e mostra só a hora da chamada).
      * v3.0.66: na ficha de Exames/Raio-X/Enfermagem, a Situação muda na hora para REALIZADO (verde) ou CANCELADO (vermelho) ao clicar em Realizar/Cancelar; antes ficava PENDENTE até salvar.
      * v3.0.65: o aviso "Senha perdida" do sistema (janela .swal2-modal) agora é reconhecido; na 3.0.64 ele passava despercebido.
      * v3.0.64: com o aviso "senha perdida" do sistema, o Atender daquele paciente passa a usar o comportamento original do sistema e abre a ficha (antes ficava tentando chamar de novo e não abria).
@@ -79,6 +80,17 @@
     // rota segura GET /prontuarios/new?prontuariavel_id=…&prontuariavel_type=AtendimentoPa
     // e combinado com informação positiva da ficha segura de medicamentos, como na v2.0.80.
     const MOSTRAR_ALERGIA = true;
+
+    // Fecha sozinho o aviso "Encaminhamento concluído" depois de salvar a ficha (true).
+    // O próximo destino aparece como aviso rápido na página seguinte, em vez de
+    // exigir o clique em OK. Com false, o popup com o destino continua como antes.
+    const PULAR_POPUP_CONCLUSAO = true;
+
+    // No Histórico da Medicação, 'automatico' lê a ficha de medicação (PDF de impressão)
+    // de cada finalizado para mostrar a hora da aplicação, 2 por vez, guardado no
+    // navegador; 'sem_pdf' não baixa PDF: aplicados mostram só a hora da chamada na sala.
+    // Cancelados mostram a hora exata nos dois modos (vem da consulta).
+    const HORARIO_HISTORICO = 'automatico';
 
     // #region nucleo
     // Regras puras (sem DOM, sem Vue). Os testes extraem esta região.
@@ -383,14 +395,24 @@
                 const obs = iObs >= 0 ? tds[iObs] || '' : '';
                 const obsLimpa = String(obs || '').replace(/\s+/g, ' ').trim();
                 const obsVazia = !obsLimpa || /^(?:-|–|—)+$/.test(obsLimpa);
-                saida.push({
+                const item = {
                     produto,
                     posologia: iPos >= 0 ? tds[iPos] || '' : '',
                     via: via(tds[iVia] || '', null),
                     observacao: obsVazia ? '' : obsLimpa,
                     estado,
                     situacao: situacao || 'PENDENTE',
-                });
+                };
+                // Cancelado: a célula da Situação traz data, profissional e motivo em data-*.
+                const canc = iSit >= 0 ? tr.querySelectorAll('td')[iSit]?.querySelector('[data-canceled-at]') : null;
+                if (canc) {
+                    const limpa = v => String(v || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+                    const m = /(\d{2}\/\d{2}\/\d{4})\D+(\d{2}:\d{2}(?::\d{2})?)/.exec(limpa(canc.getAttribute('data-canceled-at')));
+                    if (m) item.canceladoEm = `${m[1]} ${m[2].length === 5 ? m[2] + ':00' : m[2]}`;
+                    item.canceladoPor = limpa(canc.getAttribute('data-profissional-nome')).replace(/^PROFISSIONAL\s*:\s*/i, '');
+                    item.justificativa = limpa(canc.getAttribute('data-justificativa'));
+                }
+                saida.push(item);
             }
             return saida;
         }
@@ -727,10 +749,159 @@
             return { ok: !redesenhou && !erros.length, erros, conclusao: conclusaoSenha(t) };
         }
 
+        // ── Ficha de medicação em PDF (wkhtmltopdf): só o texto, sem DOM ──────────
+        async function inflarPdf(bytes) {
+            const r = new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate')));
+            return new Uint8Array(await r.arrayBuffer());
+        }
+        function cmapPdf(t) {
+            const mapa = new Map();
+            const u = h => { let o = ''; for (let i = 0; i + 4 <= h.length; i += 4) o += String.fromCharCode(parseInt(h.slice(i, i + 4), 16)); return o; };
+            for (const bloco of t.matchAll(/beginbfchar([\s\S]*?)endbfchar/g))
+                for (const m of bloco[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) mapa.set(parseInt(m[1], 16), u(m[2]));
+            for (const bloco of t.matchAll(/beginbfrange([\s\S]*?)endbfrange/g))
+                for (const m of bloco[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(\[[^\]]*\]|<[0-9A-Fa-f]+>)/g)) {
+                    const ini = parseInt(m[1], 16), fim = parseInt(m[2], 16);
+                    if (m[3][0] === '[') {
+                        const arr = Array.from(m[3].matchAll(/<([0-9A-Fa-f]+)>/g), x => u(x[1]));
+                        for (let c = ini; c <= fim && c - ini < arr.length; c++) mapa.set(c, arr[c - ini]);
+                    } else {
+                        const base = m[3].slice(1, -1), ult = parseInt(base.slice(-4), 16);
+                        for (let c = ini; c <= fim; c++) mapa.set(c, u(base.slice(0, -4) + (ult + c - ini).toString(16).padStart(4, '0')));
+                    }
+                }
+            return mapa;
+        }
+        // Texto da ficha, em linhas na ordem de leitura (colunas da mesma linha separadas por 2 espaços).
+        async function lerTextoFichaPdf(arrayBuffer) {
+            try {
+                const bytes = new Uint8Array(arrayBuffer);
+                let bin = '';
+                for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+                const objs = new Map(); // número → { dic, dados (bytes decodificados) | null }
+                for (const m of bin.matchAll(/(\d+)\s+\d+\s+obj\b/g)) {
+                    const ini = m.index + m[0].length;
+                    const fimObj = bin.indexOf('endobj', ini);
+                    if (fimObj < 0) continue;
+                    const corpo = bin.slice(ini, fimObj);
+                    const posS = corpo.indexOf('stream');
+                    if (posS < 0) { objs.set(m[1], { dic: corpo, dados: null }); continue; }
+                    const dic = corpo.slice(0, posS);
+                    let a = ini + posS + 6;
+                    if (bin[a] === '\r') a++;
+                    if (bin[a] === '\n') a++;
+                    let e = bin.indexOf('endstream', a);
+                    if (e < 0) e = fimObj;
+                    let dados = bytes.subarray(a, e);
+                    if (/FlateDecode/.test(dic)) {
+                        // O fim do stream costuma ter \r\n antes de "endstream"; o inflate rejeita lixo no final.
+                        let ok = null;
+                        for (let cortar = 0; cortar <= 2 && !ok; cortar++) { try { ok = await inflarPdf(dados.subarray(0, dados.length - cortar)); } catch (_) { /* tenta cortar mais um byte */ } }
+                        dados = ok;
+                    }
+                    objs.set(m[1], { dic, dados });
+                }
+                const latin1 = u8 => { let o = ''; for (let i = 0; i < u8.length; i += 8192) o += String.fromCharCode.apply(null, u8.subarray(i, i + 8192)); return o; };
+                const texto = n => { const o = objs.get(String(n)); return o && o.dados ? latin1(o.dados) : ''; };
+                const cmaps = new Map(); // número da fonte → Map
+                const cmapDaFonte = n => {
+                    if (cmaps.has(n)) return cmaps.get(n);
+                    const o = objs.get(String(n));
+                    const tu = o && /\/ToUnicode\s+(\d+)\s+0\s+R/.exec(o.dic);
+                    const mapa = tu ? cmapPdf(texto(tu[1])) : new Map();
+                    cmaps.set(n, mapa);
+                    return mapa;
+                };
+                const paginas = [];
+                for (const [num, o] of objs) {
+                    if (!/\/Type\s*\/Page\b(?!s)/.test(o.dic)) continue;
+                    paginas.push({ num: +num, dic: o.dic });
+                }
+                paginas.sort((a, b) => a.num - b.num);
+                const linhasTodas = [];
+                for (const pg of paginas) {
+                    // Fontes da página: /Font << /F6 6 0 R ... >> (inline ou em objeto de /Resources).
+                    let recursos = pg.dic;
+                    const rr = /\/Resources\s+(\d+)\s+0\s+R/.exec(pg.dic);
+                    if (rr && objs.get(rr[1])) recursos = objs.get(rr[1]).dic;
+                    const fontes = new Map();
+                    let fd = /\/Font\s*<<([\s\S]*?)>>/.exec(recursos);
+                    if (!fd) { const fr = /\/Font\s+(\d+)\s+0\s+R/.exec(recursos); if (fr && objs.get(fr[1])) fd = [0, objs.get(fr[1]).dic]; }
+                    if (fd) for (const m of fd[1].matchAll(/\/(\S+?)\s+(\d+)\s+0\s+R/g)) fontes.set(m[1], cmapDaFonte(m[2]));
+                    // Conteúdo: /Contents N 0 R ou [N 0 R ...].
+                    const ct = /\/Contents\s*(\[[^\]]*\]|\d+\s+0\s+R)/.exec(pg.dic);
+                    const conteudo = ct ? Array.from(ct[1].matchAll(/(\d+)\s+0\s+R/g), x => texto(x[1])).join('\n') : '';
+                    const segs = [];
+                    let fonte = new Map(), tam = 12, tm = [1, 0, 0, 1, 0, 0], atual = null;
+                    const abrir = () => { atual = { x: tm[4], y: tm[5], t: '' }; segs.push(atual); };
+                    const decodifica = (hex) => {
+                        const mapa = fonte; let o = '';
+                        for (let i = 0; i + 4 <= hex.length; i += 4) o += mapa.get(parseInt(hex.slice(i, i + 4), 16)) || '';
+                        return o;
+                    };
+                    const literal = s => s.replace(/\\([nrtbf()\\]|[0-7]{1,3})/g, (_, c) => ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' }[c] ?? (/[0-7]/.test(c[0]) ? String.fromCharCode(parseInt(c, 8)) : c)));
+                    const emite = t => { if (!atual) abrir(); atual.t += t; };
+                    const re = /\/(\S+?)\s+([\d.+-]+)\s+Tf|([\d.+-]+)\s+([\d.+-]+)\s+([\d.+-]+)\s+([\d.+-]+)\s+([\d.+-]+)\s+([\d.+-]+)\s+Tm|([\d.+-]+)\s+([\d.+-]+)\s+(Td|TD)|\bT\*|\bBT\b|\bET\b|\[((?:[^\]\\]|\\.)*)\]\s*TJ|<([0-9A-Fa-f\s]*)>\s*Tj|\(((?:[^()\\]|\\.)*)\)\s*Tj/g;
+                    for (let m; (m = re.exec(conteudo));) {
+                        const k = m[0];
+                        if (m[1] !== undefined) { fonte = fontes.get(m[1]) || new Map(); tam = parseFloat(m[2]) || 12; }
+                        else if (m[3] !== undefined) { tm = [3, 4, 5, 6, 7, 8].map(i => parseFloat(m[i])); atual = null; }
+                        else if (m[11] !== undefined) {
+                            const tx = parseFloat(m[9]), ty = parseFloat(m[10]);
+                            tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + tx * tm[0] + ty * tm[2], tm[5] + tx * tm[1] + ty * tm[3]];
+                            if (ty !== 0 || tx > tam * 1.6 || tx < 0) atual = null;
+                        }
+                        else if (k === 'T*') atual = null;
+                        else if (k === 'BT') { tm = [1, 0, 0, 1, 0, 0]; atual = null; }
+                        else if (k === 'ET') atual = null;
+                        else if (m[12] !== undefined) {
+                            for (const p of m[12].matchAll(/<([0-9A-Fa-f\s]*)>|\(((?:[^()\\]|\\.)*)\)|(-?[\d.]+)/g)) {
+                                if (p[1] !== undefined) emite(decodifica(p[1].replace(/\s+/g, '')));
+                                else if (p[2] !== undefined) emite(literal(p[2]));
+                                else if (parseFloat(p[3]) < -tam * 200 / 1000 * 3) emite(' ');
+                            }
+                        }
+                        else if (m[13] !== undefined) emite(decodifica(m[13].replace(/\s+/g, '')));
+                        else if (m[14] !== undefined) emite(literal(m[14]));
+                    }
+                    // Agrupa por y (tolerância 2) e ordena por x dentro da linha.
+                    const grupos = [];
+                    for (const sg of segs.filter(x => x.t.trim()).sort((a, b) => a.y - b.y || a.x - b.x)) {
+                        const g = grupos.find(x => Math.abs(x.y - sg.y) < 2);
+                        if (g) g.s.push(sg); else grupos.push({ y: sg.y, s: [sg] });
+                    }
+                    grupos.sort((a, b) => a.y - b.y);
+                    for (const g of grupos) linhasTodas.push(g.s.sort((a, b) => a.x - b.x).map(x => x.t.replace(/\s+/g, ' ').trim()).join('  '));
+                }
+                return linhasTodas;
+            } catch (_) { return []; }
+        }
+        // Blocos "Medicamento … Situação / produto  SITUAÇÃO / … / Data: dd/mm/aaaa hh:mm:ss".
+        function horariosFichaPdf(linhas) {
+            const saida = [];
+            try {
+                let estado = '', acc = [], produto = '', situacao = '';
+                for (const linha of linhas || []) {
+                    const s = semAcento(linha);
+                    if (/^MEDICAMENTO\b.*\bSITUACAO$/.test(s)) { estado = 'produto'; acc = []; produto = ''; situacao = ''; continue; }
+                    if (estado === 'produto') {
+                        const m = /^(.*?)\s*\b(ATENDIDA|CANCELADA|PENDENTE|REALIZADA|SUSPENSA)$/.exec(s);
+                        if (m) { produto = [...acc, m[1]].join(' ').replace(/\s+/g, ' ').trim(); situacao = m[2]; estado = 'data'; }
+                        else if (/^POSOLOGIA$/.test(s)) estado = '';
+                        else acc.push(linha.trim());
+                    } else if (estado === 'data') {
+                        const m = /^DATA\s*:\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2}(?::\d{2})?)/.exec(s);
+                        if (m) { saida.push({ produto, situacao, data: `${m[1]} ${m[2].length === 5 ? m[2] + ':00' : m[2]}` }); estado = ''; }
+                    }
+                }
+            } catch (_) { return []; }
+            return saida;
+        }
+
         return {
             RISCO_ORDEM, PERIODOS, dataHora, riscoOrdem, periodoParams, aplicarPeriodo, chaveParams, queryAxios, ordenar, filtrar,
             juntarPaginas, espera, esperaAteChamada, resumo, classesLinhas, STATUS_HISTORICO, ordenarHistorico, classesHistorico, podarRegistro, filtrosParaSalvar, filtrosParaRestaurar, isoDia,
-            via, extrairMedicacoesConsulta, municipeIdConsulta, escolherMunicipe, soDigitos, formatarCPF, formatarCNS, classificarCpfCns, interpretarAlergia, SALAS_CONSULTA, linhasConsultaSala, pendenciasOutrasSalas, filtroConsultaAtivo, marcarCancelamento, serializarFormulario, conclusaoSenha, resultadoSalvar,
+            via, extrairMedicacoesConsulta, lerTextoFichaPdf, horariosFichaPdf, municipeIdConsulta, escolherMunicipe, soDigitos, formatarCPF, formatarCNS, classificarCpfCns, interpretarAlergia, SALAS_CONSULTA, linhasConsultaSala, pendenciasOutrasSalas, filtroConsultaAtivo, marcarCancelamento, serializarFormulario, conclusaoSenha, resultadoSalvar,
         };
     }
     // #endregion nucleo
@@ -3989,9 +4160,11 @@
 
             let destino=null;
             // Backend/fila podem levar alguns instantes para refletir a transição.
+            const inicioDestino=Date.now();
             for(let tentativa=0; tentativa<18 && modal.isConnected; tentativa++){
                 destino=await csResolverDestinoConfirmado();
                 if(destino?.nome) break;
+                if(PULAR_POPUP_CONCLUSAO && Date.now()-inicioDestino>=1500) break;
                 await csSleep(tentativa<6?180:320);
             }
 
@@ -4011,7 +4184,42 @@
 
             modal.dataset.om30DestinoProcessando='0';
             modal.dataset.om30DestinoResolvido='1';
+
+            if(PULAR_POPUP_CONCLUSAO){
+                // Guarda o destino para o aviso da próxima página e clica no OK do próprio
+                // popup: o .then() do sistema segue sozinho (concluir a senha e navegar).
+                let texto='Atendimento concluído';
+                if(destino?.semRetorno) texto+=' · Sem retorno ao consultório médico';
+                else if(destino?.nome) texto+=/^Retorno ao consultório médico$/i.test(destino.nome)?' · ↩ Retorno ao consultório médico':` · → PRÓXIMA SALA: ${destino.nome}`;
+                try{sessionStorage.setItem('cs-aviso-pos-conclusao',JSON.stringify({texto,em:Date.now()}));}catch(e){}
+                modal.querySelector('.swal2-confirm')?.click();
+                // Se o OK não trocar de página, o aviso aparece aqui mesmo.
+                setTimeout(csMostrarAvisoPosConclusao,1500);
+            }
         }
+    }
+    // Aviso pós-conclusão (PULAR_POPUP_CONCLUSAO): toast não bloqueante no topo, 6 s.
+    estilo(`
+        .cs-toast-conclusao{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483000;max-width:min(520px,92vw);box-sizing:border-box;padding:10px 14px;border:1px solid #d8dee5;border-left:4px solid #7D09D5;border-radius:8px;background:#f0fdf4;color:#263238;font:700 13px/1.3 system-ui,sans-serif;box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:pointer}
+    `);
+    function csMostrarAvisoPosConclusao(){
+        let dado=null;
+        try{
+            const bruto=sessionStorage.getItem('cs-aviso-pos-conclusao');
+            if(!bruto) return;
+            sessionStorage.removeItem('cs-aviso-pos-conclusao');
+            dado=JSON.parse(bruto);
+        }catch(e){return;}
+        if(!dado?.texto||!(Date.now()-Number(dado.em)<30000)) return;
+        const el=document.createElement('div');
+        el.className='cs-toast-conclusao';
+        el.textContent=String(dado.texto);
+        el.addEventListener('click',()=>el.remove());
+        document.body.appendChild(el);
+        setTimeout(()=>el.remove(),6000);
+    }
+    if(PULAR_POPUP_CONCLUSAO){
+        if(document.body)csMostrarAvisoPosConclusao();else document.addEventListener('DOMContentLoaded',csMostrarAvisoPosConclusao,{once:true});
     }
     estilo(`
         .cs-destino-sucesso{margin:11px auto 12px;padding:10px 12px;width:min(330px,88%);box-sizing:border-box;border:1px solid #d8dee5;border-left:4px solid #7D09D5;border-radius:8px;background:#fafafa;color:#263238;text-align:left}
@@ -5031,6 +5239,13 @@
             .cs-ficha:hover{background:#dfeaff;border-color:#b6ccf7}
             .cs-doc-aviso { color:#a15c00; }
             .cs-alerg-box:empty { display:none; }
+            .cs-vitais-box:empty{display:none}
+            .cs-hist-hora:empty{display:none}
+            .cs-hist-hora-txt{font-size:11px;color:#6b7684;margin-top:2px}
+            .cs-vitais{font-size:11px;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:2px 6px;margin-top:2px;white-space:normal;line-height:1.3}
+            .cs-vitais b{font-weight:800}
+            .cs-vitais-rot{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#64748b}
+            .cs-vitais-vazio{font-style:italic;color:#94a3b8}
             /* Alergia: mesma lógica clínica da v2.0.80, mas em chip compacto na fila. */
             .cs-alerg-box{display:flex;justify-content:center;align-items:flex-start;margin-top:2px;max-width:100%}
             .cs-alerg-box .om30-med-alergia,
@@ -5895,6 +6110,7 @@
         }
 
         function pedirMedicacoes(vm, lista) {
+            if (ehMedicacao(vm)) pedirFichas(lista);
             if (!MOSTRAR_MEDICACOES || MED.desligado || !ehMedicacao(vm)) return;
             const agora = Date.now();
             const enfileirar = it => {
@@ -5934,6 +6150,88 @@
         }
 
 
+
+        // ── Hora das aplicações no Histórico (HORARIO_HISTORICO) ───────────────
+        // A consulta não traz a hora de quem foi atendido; a ficha de medicação (PDF de
+        // impressão, só leitura) traz "Data:" de cada item. Finalizado não muda mais, então
+        // o resultado fica guardado no navegador (os 300 mais recentes).
+        const HORA_FICHA = { cache: new Map(), erros: new Map(), emVoo: new Set(), fila: [], ativos: 0, CONCORRENCIA: 2, carregado: false };
+        function fichaCarregar() {
+            if (HORA_FICHA.carregado) return;
+            HORA_FICHA.carregado = true;
+            const o = lerJSON('cs-horario-ficha', {});
+            if (o && typeof o === 'object') for (const k of Object.keys(o)) if (o[k] && Array.isArray(o[k].itens)) HORA_FICHA.cache.set(k, o[k]);
+        }
+        function fichaGuardar() {
+            const recentes = Array.from(HORA_FICHA.cache.entries()).sort((a, b) => (b[1].em || 0) - (a[1].em || 0)).slice(0, 300);
+            HORA_FICHA.cache = new Map(recentes);
+            gravarJSON('cs-horario-ficha', Object.fromEntries(recentes));
+        }
+        async function buscarFicha(id) {
+            const r = await fetch(`/encaminhamentos_medicacoes/${encodeURIComponent(id)}/imprimir_ficha_medicacoes.pdf`, { credentials: 'same-origin', cache: 'no-store' });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            if (!/pdf/i.test(r.headers.get('content-type') || '')) throw new Error('a ficha não veio em PDF');
+            const itens = N.horariosFichaPdf(await N.lerTextoFichaPdf(await r.arrayBuffer()));
+            if (!itens.length) throw new Error('horários não encontrados na ficha');
+            return itens;
+        }
+        function pedirFichas(lista) {
+            if (HORARIO_HISTORICO !== 'automatico' || !CS.historico) return;
+            fichaCarregar();
+            const agora = Date.now();
+            for (const it of lista) {
+                if (it.status !== 'Finalizado') continue;
+                const id = idEncaminhamento(it.encaminhamento_id);
+                if (!id || HORA_FICHA.emVoo.has(id) || HORA_FICHA.cache.has(id)) continue;
+                const e = HORA_FICHA.erros.get(id);
+                if (e && agora - e < 10 * 60e3) continue;
+                HORA_FICHA.emVoo.add(id);
+                HORA_FICHA.fila.push(id);
+            }
+            bombearFichas();
+        }
+        function bombearFichas() {
+            while (HORA_FICHA.ativos < HORA_FICHA.CONCORRENCIA && HORA_FICHA.fila.length) {
+                const id = HORA_FICHA.fila.shift();
+                HORA_FICHA.ativos++;
+                buscarFicha(id)
+                    .then(itens => { HORA_FICHA.cache.set(id, { em: Date.now(), itens }); HORA_FICHA.erros.delete(id); fichaGuardar(); })
+                    .catch(erro => { HORA_FICHA.erros.set(id, Date.now()); console.warn('[Controle de Salas] ficha de medicação de', id, erro); })
+                    .finally(() => { HORA_FICHA.ativos--; HORA_FICHA.emVoo.delete(id); pintarMedicacoes(); bombearFichas(); });
+            }
+        }
+        // Hora da aplicação lida da ficha para um produto (nomes podem vir truncados num dos lados).
+        function dataFichaDoProduto(id, produto) {
+            const c = HORA_FICHA.cache.get(id);
+            if (!c) return '';
+            const p = semAcento(produto);
+            const x = c.itens.find(i => { const q = semAcento(i.produto); return q && p && (q.startsWith(p) || p.startsWith(q)); });
+            return x ? x.data : '';
+        }
+        // 'dd/mm/aaaa hh:mm:ss' → 'hh:mm' (+ ' de dd/mm' quando não é hoje).
+        function horaCurtaBr(data) {
+            const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})/.exec(data || '');
+            if (!m) return '';
+            const h = new Date();
+            const hoje = `${String(h.getDate()).padStart(2, '0')}/${String(h.getMonth() + 1).padStart(2, '0')}/${h.getFullYear()}`;
+            return m[4] + (`${m[1]}/${m[2]}/${m[3]}` === hoje ? '' : ` de ${m[1]}/${m[2]}`);
+        }
+        const msBr = d => { const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/.exec(d || ''); return m ? new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0)).getTime() : 0; };
+        // Linha pequena da coluna do nome no Histórico da Medicação.
+        function htmlHoraHistorico(it) {
+            const id = idEncaminhamento(it.encaminhamento_id);
+            const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/.exec(String(it.chamada_em || ''));
+            const partes = [];
+            if (m) partes.push('Chamado ' + horaCurtaBr(`${m[3]}/${m[2]}/${m[1]} ${m[4]}`));
+            const datas = [];
+            const c = MED.cache.get(id);
+            if (c && c.itens) for (const i of c.itens) if (i.canceladoEm) datas.push(i.canceladoEm);
+            const f = HORA_FICHA.cache.get(id);
+            if (f) for (const i of f.itens) datas.push(i.data);
+            const ult = datas.sort((a, b) => msBr(b) - msBr(a))[0];
+            if (ult) partes.push('Encerrado ' + horaCurtaBr(ult));
+            return partes.length ? `<div class="cs-hist-hora-txt">${esc(partes.join(' · '))}</div>` : '';
+        }
 
         // ── ALERGIA — lógica REAL da v2.0.80 ───────────────────────────────
         // O fluxo abaixo replica a estratégia da v2.0.80:
@@ -6155,6 +6453,31 @@
             }
             return saida.join(' · ');
         }
+        // Sinais vitais do acolhimento: tabela "Aferição | Sigla | Procedimento" do prontuário.
+        function extrairSinaisVitais(doc) {
+            const sem = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
+            const MAPA = { PA: ['PA', ''], TEMP: ['Tax', '°C'], FC: ['FC', ''], FR: ['FR', ''], GLI: ['Glic', ''], SAT: ['Sat', '%'], PESO: ['Peso', 'kg'] };
+            for (const tabela of doc.querySelectorAll('table')) {
+                const cab = [...tabela.querySelectorAll('th')].map(th => sem(th.textContent));
+                const iVal = cab.findIndex(h => h.includes('AFERICAO'));
+                const iSig = cab.findIndex(h => h === 'SIGLA');
+                if (iVal < 0 || iSig < 0) continue;
+                const saida = [];
+                for (const tr of tabela.querySelectorAll('tbody tr')) {
+                    const tds = tr.querySelectorAll('td');
+                    let valor = String(tds[iVal]?.textContent || '').replace(/\s+/g, ' ').trim();
+                    const siglaCrua = String(tds[iSig]?.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!valor || /^[—–-]+$/.test(valor) || !siglaCrua) continue;
+                    const base = sem(siglaCrua.replace(/\(.*?\)/g, '')).split(' ')[0].replace(/[^A-Z0-9]/g, '');
+                    if (base === 'ALTURA') continue;
+                    const m = MAPA[base];
+                    if (m && base === 'PA') valor = valor.toLowerCase();
+                    saida.push({ rotulo: m ? m[0] : siglaCrua.replace(/\s*\(.*?\)\s*/g, ' ').trim(), valor: valor + (m ? m[1] : '') });
+                }
+                return saida;
+            }
+            return [];
+        }
         function a280InterpretarProntuario(doc) {
             const estruturada = a280ExtrairEstruturada(doc);
             const evolucao = a280ExtrairEvolucao(doc);
@@ -6206,6 +6529,7 @@
                 alergiaAtendimentoId: id,
                 prontuarioId: r.url.match(/\/prontuarios\/(\d+)/i)?.[1] || '',
                 alergiaConsultaFeita: true,
+                sinaisVitais: extrairSinaisVitais(doc),
             };
         }
         function a280ParaAtual(raw, extra = {}) {
@@ -6304,6 +6628,19 @@
             return `<div class="cs-hist-nota" title="Registrado neste computador ao cancelar pela lista">Cancelado aqui às ${hora}${dia}: ${esc(r.motivo)}${r.reavaliar ? ' · enviado para reavaliação médica' : ''}</div>`;
         }
 
+        // Situação do item; no Histórico acrescenta a hora (cancelamento da consulta, aplicação da ficha).
+        function htmlSituacaoMed(it, id, m) {
+            let rotulo = `${m.estado === 'feito' ? '✓ ' : ''}${esc(m.situacao || 'não pendente')}`, dica = '';
+            if (m.estado === 'cancelado' && m.canceladoEm) {
+                rotulo = `✕ ${esc(m.situacao || 'CANCELADO')} ${esc(horaCurtaBr(m.canceladoEm))}`;
+                dica = `Cancelado em ${m.canceladoEm}${m.canceladoPor ? ' por ' + m.canceladoPor : ''}${m.justificativa ? ' · Motivo: ' + m.justificativa : ''}`;
+            } else if (m.estado === 'feito' && CS.historico) {
+                const d = dataFichaDoProduto(id, m.produto);
+                if (d) { rotulo = `✓ ${esc(m.situacao || 'ATENDIDA')} ${esc(horaCurtaBr(d))}`; dica = `Registrado em ${d} (ficha de medicação)`; }
+            }
+            return ` <span class="cs-med-sit"${dica ? ` title="${esc(dica)}"` : ''}>${rotulo}</span>`;
+        }
+
         function htmlListaMedicacoes(it) {
             const id = idEncaminhamento(it.encaminhamento_id);
             const c = MED.cache.get(id);
@@ -6319,7 +6656,7 @@
 
                     + (m.posologia ? ` <span class="cs-med-pos">${esc(m.posologia)}</span>` : '')
                     + (m.observacao ? ' <span class="cs-med-obs">obs.</span>' : '')
-                    + (m.estado !== 'pendente' ? ` <span class="cs-med-sit">${m.estado === 'feito' ? '✓ ' : ''}${esc(m.situacao || 'não pendente')}</span>` : '')
+                    + (m.estado !== 'pendente' ? htmlSituacaoMed(it, id, m) : '')
                     + '</div>').join('');
             }
             if (c && c.erro) {
@@ -6500,6 +6837,8 @@
                 if (colNome >= 0 && tr.children[colNome]) {
                     if (!CS.historico) pedirAlergia(it, tr);
                     trocarHtml(caixa(tr.children[colNome], 'cs-alerg-box'), CS.historico ? '' : htmlAlergia(it, tr));
+                    trocarHtml(caixa(tr.children[colNome], 'cs-vitais-box'), CS.historico ? '' : htmlSinaisVitais(it, tr));
+                    if (setor.key === 'medicacao') trocarHtml(caixa(tr.children[colNome], 'cs-hist-hora'), CS.historico ? htmlHoraHistorico(it) : '');
                     trocarHtml(caixa(tr.children[colNome], 'cs-doc-box', cliqueDocumentos), htmlDocumentos(it));
                 }
                 aplicarPresencaNaLinha(tr, it, setor, campos);
@@ -6609,6 +6948,18 @@
                     .catch(erro=>{console.warn('[OM30 ALERGIA] prontuário',pa,erro);ALERG.cache.set(pa,{estado:'desconhecida',alergias:[],erro:String(erro&&erro.message||erro),em:Date.now()});})
                     .finally(()=>{ALERG.ativos--;pintarMedicacoes();bombearAlergias();});
             }
+        }
+
+        function htmlSinaisVitais(it, tr) {
+            const enc=idEncaminhamento(it.encaminhamento_id);
+            const direto=enc&&ALERG.porEncDados.get(enc);
+            const pa=atendimentoPa(it,tr);
+            const clinico=pa&&ALERG.cache.get(pa);
+            const raw=(clinico||direto)?._v280;
+            const sv=raw?.sinaisVitais;
+            if(!Array.isArray(sv)) return '';
+            if(sv.length) return `<div class="cs-vitais" title="Sinais vitais do acolhimento (prontuário)"><span class="cs-vitais-rot">SV</span> ${sv.map(x=>`<b>${esc(x.rotulo)}</b> ${esc(x.valor)}`).join(' · ')}</div>`;
+            return raw.alergiaConsultaFeita===true?'<div class="cs-vitais cs-vitais-vazio">Sinais vitais: não aferidos</div>':'';
         }
 
         function htmlAlergia(it, tr) {
