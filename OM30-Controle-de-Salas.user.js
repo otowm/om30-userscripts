@@ -6145,6 +6145,7 @@
                         MED.emVoo.delete(t.id);
                         pintarMedicacoes();
                         bombearMedicacoes();
+                        bombearFichas();
                     });
             }
         }
@@ -6168,7 +6169,7 @@
             gravarJSON('cs-horario-ficha', Object.fromEntries(recentes));
         }
         async function buscarFicha(id) {
-            const r = await fetch(`/encaminhamentos_medicacoes/${encodeURIComponent(id)}/imprimir_ficha_medicacoes.pdf`, { credentials: 'same-origin', cache: 'no-store' });
+            const r = await fetch(`/encaminhamentos_medicacoes/${encodeURIComponent(id)}/imprimir_ficha_medicacoes.pdf`, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(20000) });
             if (!r.ok) throw new Error('HTTP ' + r.status);
             if (!/pdf/i.test(r.headers.get('content-type') || '')) throw new Error('a ficha não veio em PDF');
             const itens = N.horariosFichaPdf(await N.lerTextoFichaPdf(await r.arrayBuffer()));
@@ -6191,6 +6192,8 @@
             bombearFichas();
         }
         function bombearFichas() {
+            // As consultas de medicação vão primeiro; a ficha só sai com a fila delas vazia.
+            if (MED.fila.length) return;
             while (HORA_FICHA.ativos < HORA_FICHA.CONCORRENCIA && HORA_FICHA.fila.length) {
                 const id = HORA_FICHA.fila.shift();
                 HORA_FICHA.ativos++;
@@ -6519,6 +6522,7 @@
             if (!id || a280Normalizar(tipo) !== 'ATENDIMENTOPA') return null;
             const r = await fetch(`/prontuarios/new?prontuariavel_id=${encodeURIComponent(id)}&prontuariavel_type=AtendimentoPa`, {
                 method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'follow', headers: { Accept: 'text/html,application/xhtml+xml' },
+                signal: AbortSignal.timeout(20000),
             });
             if (!r.ok) throw new Error(`PRONTUARIO_HTTP_${r.status}`);
             const html = await r.text();
@@ -6560,7 +6564,8 @@
 
             // Igual à 2.0.80: prontuário e medicamentos em paralelo.
             let promessaAlergia = Promise.resolve(null);
-            if (pa) {
+            // No Histórico a alergia não aparece: não baixa o prontuário (2ª página pesada por linha).
+            if (pa && !CS.historico) {
                 const aproveitavel = a280CacheReutilizavel(cacheEnc, pa) ? cacheEnc : (a280CacheReutilizavel(cachePa, pa) ? cachePa : null);
                 if (aproveitavel) promessaAlergia = Promise.resolve(aproveitavel._v280 || null);
                 else promessaAlergia = a280BuscarNoProntuario(pa, 'AtendimentoPa').catch(erro => {
@@ -6571,6 +6576,7 @@
 
             const r = await fetch(caminhoConsulta, {
                 credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'text/html' },
+                signal: AbortSignal.timeout(20000),
             });
             if (r.redirected || new URL(r.url, location.href).pathname.replace(/\/+$/, '') !== caminhoConsulta) {
                 MED.desligado = `a consulta de medicações foi redirecionada para ${new URL(r.url, location.href).pathname}`;
